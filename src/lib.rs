@@ -11,5 +11,7 @@ mod discovery;
 mod dns;
 mod emulation;
 pub mod emulation_test;
+#[cfg(feature = "file_drop")]
+pub(crate) mod file_transfer;
 mod listen;
 pub mod service;
