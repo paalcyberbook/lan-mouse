@@ -1,12 +1,12 @@
 [Desktop Entry]
 Categories=Utility;
-Comment[en_US]=Mouse & Keyboard sharing via LAN
-Comment=Mouse & Keyboard sharing via LAN
-Comment[de_DE]=Maus- und Tastaturfreigabe über LAN
+Comment[en_US]=Mouse, keyboard & file sharing via LAN
+Comment=Mouse, keyboard & file sharing via LAN
+Comment[de_DE]=Maus-, Tastatur- und Dateifreigabe über LAN
 Exec=lan-mouse
 Icon=de.feschber.LanMouse
-Name[en_US]=Lan Mouse
-Name=Lan Mouse
+Name[en_US]=Lan Mouse+
+Name=Lan Mouse+
 StartupNotify=true
 Terminal=false
 Type=Application

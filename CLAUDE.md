@@ -4,11 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Fork context
 
-This repo is a fork of upstream `feschber/lan-mouse`. Focus of the fork is **user-facing polish** — enhanced connectivity, easier setup, Windows packaging — rather than mirroring upstream feature-for-feature.
+This repo is **Lan Mouse+** — a user-facing fork of upstream
+`feschber/lan-mouse`. Focus of the fork is **user-facing polish** —
+enhanced connectivity, file transfer, easier setup, Windows packaging —
+rather than mirroring upstream feature-for-feature.
 
 - `origin` → `paalcyberbook/lan-mouse` (the fork — PRs land here)
 - `upstream` → `feschber/lan-mouse` (pull-only, for syncing)
 - Active work branch: `feature/enhanced-connectivity`
+- Display name / branding: **Lan Mouse+** (see README). The Rust package
+  is still named `lan-mouse` so crate dependencies don't churn.
 
 When suggesting changes, prefer UX improvements and connectivity/packaging fixes over speculative refactors. Don't assume upstream parity is a goal.
 

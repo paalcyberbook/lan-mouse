@@ -132,6 +132,6 @@ file_drop = [
 ]
 
 [package.metadata.bundle]
-name = "Lan Mouse"
+name = "Lan Mouse+"
 icon = ["target/icon.icns"]
 identifier = "de.feschber.LanMouse"

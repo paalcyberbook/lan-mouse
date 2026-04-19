@@ -1,4 +1,4 @@
-; NSIS installer script for Lan Mouse.
+; NSIS installer script for Lan Mouse+.
 ;
 ; Expects the staged output directory at $STAGE_DIR to contain:
 ;   bin\lan-mouse.exe
@@ -18,8 +18,10 @@
 
 !include "MUI2.nsh"
 
-Name "Lan Mouse"
+Name "Lan Mouse+"
 OutFile "${OUT_FILE}"
+; Install dir stays "Lan Mouse" so upgrades from unbranded builds don't
+; leave an orphan directory; the user-facing Name above carries the plus.
 InstallDir "$PROGRAMFILES64\Lan Mouse"
 InstallDirRegKey HKLM "Software\LanMouse" "InstallDir"
 RequestExecutionLevel admin
@@ -40,7 +42,7 @@ Unicode true
 
 !insertmacro MUI_LANGUAGE "English"
 
-Section "Lan Mouse (required)" SecCore
+Section "Lan Mouse+ (required)" SecCore
   SectionIn RO
   SetOutPath "$INSTDIR"
   File /r "${STAGE_DIR}\bin"
@@ -50,7 +52,7 @@ Section "Lan Mouse (required)" SecCore
 
   ; Add/Remove Programs entry
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\LanMouse" \
-    "DisplayName" "Lan Mouse"
+    "DisplayName" "Lan Mouse+"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\LanMouse" \
     "UninstallString" '"$INSTDIR\uninstall.exe"'
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\LanMouse" \

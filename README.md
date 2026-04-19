@@ -1,11 +1,27 @@
-# Lan Mouse
+# Lan Mouse+
+
+> **Fork notice.** This is `paalcyberbook/lan-mouse` — a user-facing
+> fork of [feschber/lan-mouse](https://github.com/feschber/lan-mouse)
+> branded **Lan Mouse+**. It carries the full upstream feature set plus
+> enhancements focused on connectivity and UX, notably:
+>
+> * File / folder transfer between machines (edge drop zone on Wayland
+>   wlroots + Windows; per-client GTK drop target everywhere else).
+> * Oversize clipboard + clipboard-image handoff via the file-transfer
+>   channel.
+> * Windows packaging improvements (`Dockerfile.windows`, installer).
+>
+> See the [File transfer](#file-transfer-edge-drop-zone) section below
+> for what's new in this fork.
 
 [![CI](https://github.com/feschber/lan-mouse/actions/workflows/rust.yml/badge.svg)](https://github.com/feschber/lan-mouse/actions/workflows/rust.yml) [![Cachix](https://github.com/feschber/lan-mouse/actions/workflows/cachix.yml/badge.svg)](https://github.com/feschber/lan-mouse/actions/workflows/cachix.yml) [![Release](https://github.com/feschber/lan-mouse/actions/workflows/release.yml/badge.svg)](https://github.com/feschber/lan-mouse/actions/workflows/release.yml)
 
 [![crates.io](https://img.shields.io/crates/v/lan-mouse.svg)](https://crates.io/crates/lan-mouse)  [![license](https://img.shields.io/crates/l/lan-mouse.svg)](https://github.com/feschber/lan-mouse/blob/main/Cargo.toml)
 
-Lan Mouse is a *cross-platform* mouse and keyboard sharing software similar to universal-control on Apple devices.
-It allows for using multiple PCs via a single set of mouse and keyboard.
+Lan Mouse+ is a *cross-platform* mouse, keyboard, and file-sharing tool
+similar to universal-control on Apple devices.
+It allows for using multiple PCs via a single set of mouse and keyboard,
+and for moving files between them without scp/USB stick detours.
 This is also known as a Software KVM switch.
 
 Goal of this project is to be an open-source alternative to proprietary tools like [Synergy 2/3](https://symless.com/synergy), [Share Mouse](https://www.sharemouse.com/de/)
@@ -16,6 +32,7 @@ Focus lies on performance, ease of use and a maintainable implementation that ca
 ***blazingly fast™*** because it's written in rust.
 
 - _Now with a gtk frontend_
+- _Now with file transfer (fork)_
 
 <picture>
     <source media="(prefers-color-scheme: dark)" srcset="/screenshots/dark.png?raw=true">
