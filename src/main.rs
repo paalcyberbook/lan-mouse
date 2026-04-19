@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use env_logger::Env;
 use input_capture::InputCaptureError;
 use input_emulation::InputEmulationError;
@@ -41,6 +43,12 @@ enum LanMouseError {
 }
 
 fn main() {
+    // On Windows GUI-subsystem builds there is no attached console. If we were
+    // launched from an existing cmd/PowerShell, attach to that console so
+    // env_logger output is still visible in the terminal the user invoked us from.
+    #[cfg(windows)]
+    attach_parent_console();
+
     // init logging
     let env = Env::default().filter_or("LAN_MOUSE_LOG_LEVEL", "info");
     env_logger::init_from_env(env);
@@ -48,6 +56,41 @@ fn main() {
     if let Err(e) = run() {
         log::error!("{e}");
         process::exit(1);
+    }
+}
+
+#[cfg(windows)]
+fn attach_parent_console() {
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileA, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::Console::{
+        ATTACH_PARENT_PROCESS, AttachConsole, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
+    };
+
+    unsafe {
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+            // No parent console (launched from Explorer). Run silent; logs just disappear.
+            return;
+        }
+
+        // After AttachConsole, Rust's stdout/stderr still point at whatever handles
+        // the GUI-subsystem loader gave us (typically NULL), so writes vanish.
+        // Rebind STD_OUTPUT_HANDLE / STD_ERROR_HANDLE to the attached console.
+        let conout = CreateFileA(
+            b"CONOUT$\0".as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        );
+        if !conout.is_null() && conout != INVALID_HANDLE_VALUE {
+            SetStdHandle(STD_OUTPUT_HANDLE, conout);
+            SetStdHandle(STD_ERROR_HANDLE, conout);
+        }
     }
 }
 

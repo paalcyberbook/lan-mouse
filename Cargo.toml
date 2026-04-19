@@ -6,13 +6,14 @@ members = [
     "lan-mouse-ipc",
     "lan-mouse-cli",
     "lan-mouse-gtk",
+    "lan-mouse-launcher",
     "lan-mouse-proto",
 ]
 
 [package]
 name = "lan-mouse"
 description = "Software KVM Switch / mouse & keyboard sharing software for Local Area Networks"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/feschber/lan-mouse"
@@ -25,6 +26,7 @@ panic = "abort"
 
 [build-dependencies]
 shadow-rs = "1.2.0"
+embed-resource = "3.0"
 
 [dependencies]
 input-event = { path = "input-event", version = "0.3.0" }
@@ -37,6 +39,7 @@ lan-mouse-proto = { path = "lan-mouse-proto", version = "0.2.0" }
 shadow-rs = { version = "1.2.0", features = ["metadata"] }
 
 hickory-resolver = "0.25.2"
+hostname = "0.4.0"
 toml = "0.8"
 toml_edit = { version = "0.22", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -68,9 +71,19 @@ rustls = { version = "0.23.12", default-features = false, features = [
 rcgen = "0.13.1"
 sha2 = "0.10.8"
 notify = "8.2.0"
+mdns-sd = { version = "0.12", optional = true }
+arboard = { version = "3", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.148"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_System_Console",
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+] }
 
 [features]
 default = [
@@ -82,6 +95,8 @@ default = [
     "libei_emulation",
     "rdp_emulation",
     "x11_emulation",
+    "discovery",
+    "clipboard",
 ]
 gtk = ["dep:lan-mouse-gtk"]
 layer_shell_capture = ["input-capture/layer_shell"]
@@ -91,6 +106,8 @@ libei_emulation = ["input-event/libei", "input-emulation/libei"]
 wlroots_emulation = ["input-emulation/wlroots"]
 x11_emulation = ["input-emulation/x11"]
 rdp_emulation = ["input-emulation/remote_desktop_portal"]
+discovery = ["dep:mdns-sd"]
+clipboard = ["dep:arboard"]
 
 [package.metadata.bundle]
 name = "Lan Mouse"

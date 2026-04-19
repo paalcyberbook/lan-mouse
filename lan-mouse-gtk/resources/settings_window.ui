@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <requires lib="gtk" version="4.0"/>
+  <requires lib="libadwaita" version="1.4"/>
+  <template class="LanMouseSettingsWindow" parent="AdwPreferencesWindow">
+    <property name="title" translatable="yes">Settings</property>
+    <property name="default-width">500</property>
+    <property name="default-height">600</property>
+    <property name="search-enabled">false</property>
+    <child>
+      <object class="AdwPreferencesPage">
+        <child>
+          <object class="AdwPreferencesGroup">
+            <property name="title" translatable="yes">Discovery</property>
+            <child>
+              <object class="AdwSwitchRow" id="discoverable_on_startup_switch">
+                <property name="title">Discoverable on startup</property>
+                <property name="subtitle">Automatically enable discoverable when lan-mouse starts</property>
+              </object>
+            </child>
+            <child>
+              <object class="AdwSwitchRow" id="auto_accept_switch">
+                <property name="title">Auto-accept discovered devices</property>
+                <property name="subtitle">Automatically connect when a discoverable client is found</property>
+              </object>
+            </child>
+            <child>
+              <object class="AdwActionRow" id="auto_accept_warning">
+                <property name="title">Security Warning</property>
+                <property name="subtitle">Auto-accept allows any device on your network to connect without approval</property>
+                <property name="icon-name">dialog-warning-symbolic</property>
+                <property name="visible">false</property>
+                <style>
+                  <class name="warning"/>
+                </style>
+              </object>
+            </child>
+          </object>
+        </child>
+        <child>
+          <object class="AdwPreferencesGroup">
+            <property name="title" translatable="yes">General</property>
+            <child>
+              <object class="AdwSwitchRow" id="start_minimized_switch">
+                <property name="title">Start minimized</property>
+                <property name="subtitle">Start lan-mouse in the background</property>
+              </object>
+            </child>
+            <child>
+              <object class="AdwActionRow" id="release_bind_row">
+                <property name="title">Mouse release key combo</property>
+                <property name="subtitle">Press these keys together to release the mouse</property>
+              </object>
+            </child>
+          </object>
+        </child>
+        <child>
+          <object class="AdwPreferencesGroup">
+            <property name="title" translatable="yes">Network</property>
+            <child>
+              <object class="AdwSwitchRow" id="ipv6_enabled_switch">
+                <property name="title">Enable IPv6</property>
+                <property name="subtitle">Listen on IPv6 interfaces (requires restart)</property>
+                <property name="active">true</property>
+              </object>
+            </child>
+            <child>
+              <object class="AdwComboRow" id="listen_ipv4_combo">
+                <property name="title">Listen IPv4 interface</property>
+                <property name="subtitle">Select which IPv4 address to listen on</property>
+              </object>
+            </child>
+            <child>
+              <object class="AdwComboRow" id="listen_ipv6_combo">
+                <property name="title">Listen IPv6 interface</property>
+                <property name="subtitle">Select which IPv6 address to listen on</property>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+    </child>
+  </template>
+</interface>

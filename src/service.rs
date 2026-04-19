@@ -8,6 +8,8 @@ use crate::{
     emulation::{Emulation, EmulationEvent},
     listen::{LanMouseListener, ListenerCreationError},
 };
+#[cfg(feature = "discovery")]
+use crate::discovery::DiscoveryService;
 use futures::StreamExt;
 use hickory_resolver::ResolveError;
 use lan_mouse_ipc::{
@@ -70,6 +72,20 @@ pub struct Service {
     /// map from capture handle to connection info
     incoming_conn_info: HashMap<ClientHandle, Incoming>,
     next_trigger_handle: u64,
+    /// clipboard monitor (kept alive)
+    #[cfg(feature = "clipboard")]
+    clipboard_monitor: Option<crate::clipboard::ClipboardMonitor>,
+    /// clipboard change receiver
+    clipboard_rx: local_channel::mpsc::Receiver<String>,
+    /// mDNS discovery event receiver
+    discovery_rx: local_channel::mpsc::Receiver<FrontendEvent>,
+    /// mDNS discovery service
+    #[cfg(feature = "discovery")]
+    discovery: Option<DiscoveryService>,
+    /// cache of currently discovered devices (hostname -> DiscoveredDevice event).
+    /// Used to filter out devices already added as connections, and to
+    /// re-surface them if the corresponding connection is later deleted.
+    discovered_devices: HashMap<String, FrontendEvent>,
 }
 
 #[derive(Debug)]
@@ -94,10 +110,30 @@ impl Service {
         let frontend_listener = AsyncFrontendListener::new().await?;
 
         let authorized_keys = Arc::new(RwLock::new(config.authorized_fingerprints()));
+
+        // Log listening interfaces
+        let ipv6_enabled = config.ipv6_enabled();
+        let listen_ipv4 = config.listen_ipv4();
+        let listen_ipv6 = config.listen_ipv6();
+        if ipv6_enabled {
+            log::info!(
+                "listening on IPv4: {}, IPv6: {}, port: {}",
+                listen_ipv4.map(|ip| ip.to_string()).unwrap_or_else(|| "all (0.0.0.0)".into()),
+                listen_ipv6.map(|ip| ip.to_string()).unwrap_or_else(|| "all ([::])" .into()),
+                config.port()
+            );
+        } else {
+            log::info!(
+                "listening on IPv4: {}, IPv6: disabled, port: {}",
+                listen_ipv4.map(|ip| ip.to_string()).unwrap_or_else(|| "all (0.0.0.0)".into()),
+                config.port()
+            );
+        }
+
         // listener + connection
         let listener =
-            LanMouseListener::new(config.port(), cert.clone(), authorized_keys.clone()).await?;
-        let conn = LanMouseConnection::new(cert.clone(), client_manager.clone());
+            LanMouseListener::new(config.port(), cert.clone(), authorized_keys.clone(), ipv6_enabled).await?;
+        let conn = LanMouseConnection::new(cert.clone(), client_manager.clone(), ipv6_enabled);
 
         // input capture + emulation
         let capture_backend = config.capture_backend().map(|b| b.into());
@@ -109,6 +145,54 @@ impl Service {
         let resolver = DnsResolver::new()?;
 
         let port = config.port();
+
+        // initialize clipboard monitor
+        #[cfg(feature = "clipboard")]
+        let (clipboard_monitor, clipboard_rx) = {
+            match crate::clipboard::ClipboardMonitor::new() {
+                Ok((m, rx)) => {
+                    log::info!("clipboard sharing enabled");
+                    (Some(m), rx)
+                }
+                Err(e) => {
+                    log::warn!("clipboard sharing unavailable: {e}");
+                    let (_, rx) = local_channel::mpsc::channel::<String>();
+                    (None, rx)
+                }
+            }
+        };
+        #[cfg(not(feature = "clipboard"))]
+        let clipboard_rx = {
+            let (_, rx) = local_channel::mpsc::channel::<String>();
+            rx
+        };
+
+        // initialize mDNS discovery
+        #[cfg(feature = "discovery")]
+        let (discovery, discovery_rx) = {
+            let hostname = hostname::get()
+                .ok()
+                .and_then(|h| h.to_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| "lan-mouse".to_string());
+            let discoverable = config.discoverable();
+            match DiscoveryService::new(port, public_key_fingerprint.clone(), hostname, discoverable) {
+                Ok((d, rx)) => {
+                    log::info!("mDNS discovery enabled (discoverable: {discoverable})");
+                    (Some(d), rx)
+                }
+                Err(e) => {
+                    log::warn!("mDNS discovery unavailable: {e}");
+                    let (_, rx) = local_channel::mpsc::channel();
+                    (None, rx)
+                }
+            }
+        };
+        #[cfg(not(feature = "discovery"))]
+        let discovery_rx = {
+            let (_, rx) = local_channel::mpsc::channel::<FrontendEvent>();
+            rx
+        };
+
         let service = Self {
             config,
             capture,
@@ -126,6 +210,13 @@ impl Service {
             incoming_conn_info: Default::default(),
             incoming_conns: Default::default(),
             next_trigger_handle: 0,
+            #[cfg(feature = "clipboard")]
+            clipboard_monitor,
+            clipboard_rx,
+            discovery_rx,
+            #[cfg(feature = "discovery")]
+            discovery,
+            discovered_devices: HashMap::new(),
         };
         Ok(service)
     }
@@ -151,6 +242,8 @@ impl Service {
                 event = self.capture.event() => self.handle_capture_event(event),
                 event = self.resolver.event() => self.handle_resolver_event(event),
                 _ = self.config.changed() => self.handle_config_change(),
+                Some(text) = self.clipboard_rx.next() => self.handle_clipboard_changed(text),
+                Some(event) = self.discovery_rx.next() => self.handle_discovery_event(event),
                 r = signal::ctrl_c() => break r.expect("failed to wait for CTRL+C"),
             }
         }
@@ -218,6 +311,21 @@ impl Service {
                 self.update_enter_hook(handle, enter_hook)
             }
             FrontendRequest::SaveConfiguration => self.save_config(),
+            FrontendRequest::AcceptDiscoveredDevice {
+                hostname,
+                addrs,
+                port,
+                fingerprint,
+                position,
+            } => {
+                self.accept_discovered_device(hostname, addrs, port, fingerprint, position);
+            }
+            FrontendRequest::SetDiscoverable(discoverable) => {
+                self.set_discoverable(discoverable);
+            }
+            FrontendRequest::UpdateSettings(settings) => {
+                self.update_settings(settings);
+            }
         }
     }
 
@@ -225,6 +333,16 @@ impl Service {
         let clients = self.client_manager.clients();
         let clients = clients
             .into_iter()
+            // Skip empty placeholder connections (no hostname and no fixed IPs)
+            // so closing the app with an unfilled "+ Add" row doesn't persist.
+            .filter(|(c, _)| {
+                let has_hostname = c
+                    .hostname
+                    .as_deref()
+                    .map(|h| !h.is_empty())
+                    .unwrap_or(false);
+                has_hostname || !c.fix_ips.is_empty()
+            })
             .map(|(c, s)| ConfigClient {
                 ips: HashSet::from_iter(c.fix_ips),
                 hostname: c.hostname,
@@ -275,6 +393,13 @@ impl Service {
     fn handle_emulation_event(&mut self, event: EmulationEvent) {
         match event {
             EmulationEvent::ConnectionAttempt { fingerprint } => {
+                // If discoverable is on, auto-authorize incoming connection attempts
+                #[cfg(feature = "discovery")]
+                if self.discovery.as_ref().is_some_and(|d| d.is_discoverable()) {
+                    log::info!("auto-authorizing incoming connection: {}", &fingerprint[..16]);
+                    self.add_authorized_key("discovered-peer".into(), fingerprint.clone());
+                    self.save_config();
+                }
                 self.notify_frontend(FrontendEvent::ConnectionAttempt { fingerprint });
             }
             EmulationEvent::Entered {
@@ -290,6 +415,11 @@ impl Service {
                         addr,
                         pos,
                     });
+                    // NOTE: no clipboard push from the emulation (receiving) side on enter.
+                    // The capturing side (the one moving the cursor) is treated as
+                    // authoritative and pushes its clipboard via `ICaptureEvent::ClientEntered`,
+                    // so this side only receives. Real-time copies on this device still
+                    // propagate via the polling broadcast path.
                 } else {
                     self.update_incoming(addr, pos, fingerprint);
                 }
@@ -319,6 +449,13 @@ impl Service {
             EmulationEvent::Connected { addr, fingerprint } => {
                 self.notify_frontend(FrontendEvent::DeviceConnected { addr, fingerprint });
             }
+            #[cfg(feature = "clipboard")]
+            EmulationEvent::ClipboardReceived(text) => {
+                log::info!("clipboard received ({} bytes)", text.len());
+                if let Some(ref clipboard) = self.clipboard_monitor {
+                    clipboard.set_text(&text);
+                }
+            }
         }
     }
 
@@ -342,6 +479,23 @@ impl Service {
             ICaptureEvent::ClientEntered(handle) => {
                 log::info!("entering client {handle} ...");
                 self.spawn_hook_command(handle);
+                // Sync clipboard to the client we're entering
+                #[cfg(feature = "clipboard")]
+                if let Some(ref monitor) = self.clipboard_monitor {
+                    let clip = monitor.get_current_text();
+                    if !clip.is_empty() {
+                        log::info!("syncing clipboard to client on enter ({} bytes)", clip.len());
+                        let data = crate::clipboard::encode_clipboard_msg(&clip);
+                        self.capture.send_clipboard(&data);
+                    }
+                }
+            }
+            #[cfg(feature = "clipboard")]
+            ICaptureEvent::ClipboardReceived(text) => {
+                log::info!("clipboard received from remote client ({} bytes)", text.len());
+                if let Some(ref clipboard) = self.clipboard_monitor {
+                    clipboard.set_text(&text);
+                }
             }
         }
     }
@@ -381,6 +535,10 @@ impl Service {
         ));
         let keys = self.authorized_keys.read().expect("lock").clone();
         self.notify_frontend(FrontendEvent::AuthorizedUpdated(keys));
+        let settings = self.config.settings();
+        self.notify_frontend(FrontendEvent::SettingsChanged(settings));
+        let discoverable = self.config.discoverable();
+        self.notify_frontend(FrontendEvent::DiscoverableChanged(discoverable));
     }
 
     const ENTER_HANDLE_BEGIN: u64 = u64::MAX / 2 + 1;
@@ -522,15 +680,26 @@ impl Service {
     }
 
     fn remove_client(&mut self, handle: ClientHandle) {
-        if self
-            .client_manager
-            .remove_client(handle)
-            .map(|(_, s)| s.active)
-            .unwrap_or(false)
-        {
-            self.capture.destroy(handle);
+        let removed = self.client_manager.remove_client(handle);
+        if let Some((_, ref s)) = removed {
+            if s.active {
+                self.capture.destroy(handle);
+            }
         }
         self.notify_frontend(FrontendEvent::Deleted(handle));
+
+        // If the removed connection's hostname still matches a cached
+        // discovered device (and no *other* connection uses it), re-surface it.
+        if let Some((c, _)) = removed {
+            if let Some(hostname) = c.hostname {
+                if !self.hostname_has_client(&hostname) {
+                    if let Some(event) = self.discovered_devices.get(&hostname).cloned() {
+                        log::info!("re-surfacing discovered device {hostname} after delete");
+                        self.notify_frontend(event);
+                    }
+                }
+            }
+        }
     }
 
     fn update_fix_ips(&mut self, handle: ClientHandle, fix_ips: Vec<IpAddr>) {
@@ -540,7 +709,17 @@ impl Service {
 
     fn update_hostname(&mut self, handle: ClientHandle, hostname: Option<String>) {
         log::info!("hostname changed: {hostname:?}");
-        if self.client_manager.set_hostname(handle, hostname.clone()) {
+        // Detect if the input is already an IP address
+        if let Some(ref h) = hostname {
+            if let Ok(ip) = h.parse::<IpAddr>() {
+                log::info!("detected IP address input: {ip}, using directly");
+                self.client_manager.set_hostname(handle, hostname);
+                self.client_manager.set_fix_ips(handle, vec![ip]);
+                self.broadcast_client(handle);
+                return;
+            }
+        }
+        if self.client_manager.set_hostname(handle, hostname) {
             self.resolve(handle);
         }
         self.broadcast_client(handle);
@@ -572,6 +751,119 @@ impl Service {
             .map(|(c, s)| FrontendEvent::State(handle, c, s))
             .unwrap_or(FrontendEvent::NoSuchClient(handle));
         self.notify_frontend(event);
+    }
+
+    fn handle_clipboard_changed(&mut self, text: String) {
+        log::info!("clipboard changed, broadcasting ({} bytes)", text.len());
+        #[cfg(feature = "clipboard")]
+        {
+            let data = crate::clipboard::encode_clipboard_msg(&text);
+            // Send to incoming connections (when we're being controlled)
+            self.emulation.send_clipboard(&data);
+            // Send to outgoing connections (when we're controlling others)
+            self.capture.send_clipboard(&data);
+        }
+        let _ = text;
+    }
+
+    fn set_discoverable(&mut self, discoverable: bool) {
+        #[cfg(feature = "discovery")]
+        if let Some(ref mut discovery) = self.discovery {
+            if let Err(e) = discovery.set_discoverable(discoverable) {
+                log::warn!("failed to set discoverable: {e}");
+            }
+        }
+        // Don't save to config — discoverable is session-only.
+        // The "discoverable on startup" setting controls the initial state.
+        self.notify_frontend(FrontendEvent::DiscoverableChanged(discoverable));
+    }
+
+    fn update_settings(&mut self, settings: lan_mouse_ipc::Settings) {
+        self.config.set_settings(&settings);
+        if let Err(e) = self.config.write_back() {
+            log::warn!("failed to write config: {e}");
+        }
+        self.notify_frontend(FrontendEvent::SettingsChanged(settings));
+    }
+
+    fn handle_discovery_event(&mut self, event: lan_mouse_ipc::FrontendEvent) {
+        match &event {
+            FrontendEvent::DiscoveredDevice { hostname, fingerprint, .. } => {
+                // Auto-authorize discovered devices' fingerprints so connections work immediately
+                if !fingerprint.is_empty() {
+                    let keys = self.authorized_keys.read().expect("lock");
+                    if !keys.contains_key(fingerprint) {
+                        drop(keys);
+                        log::info!("auto-authorizing discovered device: {hostname}");
+                        self.add_authorized_key(hostname.clone(), fingerprint.clone());
+                        self.save_config();
+                    }
+                }
+                // Cache the event so it can be re-emitted if a matching
+                // connection is later deleted.
+                self.discovered_devices.insert(hostname.clone(), event.clone());
+                // Filter: suppress if a connection already exists for this hostname.
+                if self.hostname_has_client(hostname) {
+                    log::debug!(
+                        "suppressing discovered device {hostname} — connection already exists"
+                    );
+                    return;
+                }
+            }
+            FrontendEvent::DeviceLost { hostname } => {
+                self.discovered_devices.remove(hostname);
+            }
+            _ => {}
+        }
+        self.notify_frontend(event);
+    }
+
+    fn hostname_has_client(&self, hostname: &str) -> bool {
+        self.client_manager
+            .clients()
+            .iter()
+            .any(|(c, _)| c.hostname.as_deref() == Some(hostname))
+    }
+
+    fn accept_discovered_device(
+        &mut self,
+        hostname: String,
+        addrs: Vec<IpAddr>,
+        port: u16,
+        fingerprint: String,
+        position: Position,
+    ) {
+        // Authorize the fingerprint
+        self.add_authorized_key(hostname.clone(), fingerprint);
+
+        // Create a new client with the discovered info
+        let handle = self.client_manager.add_client();
+        self.client_manager
+            .set_hostname(handle, Some(hostname.clone()));
+        self.client_manager.set_port(handle, port);
+        self.client_manager.set_pos(handle, position);
+
+        // Use discovered IPs directly so we don't depend on DNS
+        if !addrs.is_empty() {
+            log::info!("using discovered IPs for {hostname}: {addrs:?}");
+            self.client_manager.set_fix_ips(handle, addrs);
+        }
+
+        let (c, s) = self.client_manager.get_state(handle).unwrap();
+        self.notify_frontend(FrontendEvent::Created(handle, c, s));
+
+        // Activate the client
+        self.activate_client(handle);
+        self.save_config();
+
+        // Tell the frontend to drop this device from the "discovered" list,
+        // since it's now a connection. The cache is kept so it can be
+        // re-surfaced if the connection is later deleted.
+        self.notify_frontend(FrontendEvent::DeviceLost {
+            hostname: hostname.clone(),
+        });
+
+        log::info!("accepted discovered device: {hostname} at position {position}");
     }
 
     fn spawn_hook_command(&self, handle: ClientHandle) {

@@ -46,6 +46,11 @@ pub(crate) enum ListenEvent {
     Rejected {
         fingerprint: String,
     },
+    #[cfg(feature = "clipboard")]
+    ClipboardText {
+        text: String,
+        addr: SocketAddr,
+    },
 }
 
 pub(crate) struct LanMouseListener {
@@ -68,6 +73,7 @@ impl LanMouseListener {
         port: u16,
         cert: Certificate,
         authorized_keys: Arc<RwLock<HashMap<String, String>>>,
+        ipv6_enabled: bool,
     ) -> Result<Self, ListenerCreationError> {
         let (listen_tx, listen_rx) = channel();
         let (request_port_change, mut request_port_change_rx) = channel();
@@ -109,7 +115,13 @@ impl LanMouseListener {
             ..Default::default()
         };
 
-        let listen_addr = SocketAddr::new("0.0.0.0".parse().expect("invalid ip"), port);
+        let listen_addr = if ipv6_enabled {
+            // Dual-stack: accepts both IPv4 and IPv6
+            SocketAddr::new("::".parse().expect("invalid ip"), port)
+        } else {
+            // IPv4 only
+            SocketAddr::new("0.0.0.0".parse().expect("invalid ip"), port)
+        };
         let mut listener = listen(listen_addr, cfg.clone()).await?;
 
         let conns: Rc<AsyncMutex<Vec<(SocketAddr, ArcConn)>>> =
@@ -158,7 +170,11 @@ impl LanMouseListener {
                         },
                         port = request_port_change_rx.recv() => {
                             let port = port.expect("channel closed");
-                            let listen_addr = SocketAddr::new("0.0.0.0".parse().expect("invalid ip"), port);
+                            let listen_addr = if ipv6_enabled {
+                                SocketAddr::new("::".parse().expect("invalid ip"), port)
+                            } else {
+                                SocketAddr::new("0.0.0.0".parse().expect("invalid ip"), port)
+                            };
                             match listen(listen_addr, cfg.clone()).await {
                                 Ok(new_listener) => {
                                     let _ = listener.close().await;
@@ -214,6 +230,16 @@ impl LanMouseListener {
         }
     }
 
+    /// Send raw bytes to all connected peers (used for clipboard)
+    pub(crate) async fn send_raw_to_all(&self, data: &[u8]) {
+        let conns = self.conns.lock().await;
+        for (addr, conn) in conns.iter() {
+            if let Err(e) = conn.send(data).await {
+                log::warn!("failed to send raw data to {addr}: {e}");
+            }
+        }
+    }
+
     pub(crate) async fn get_certificate_fingerprint(&self, addr: SocketAddr) -> Option<String> {
         if let Some(conn) = self
             .conns
@@ -245,16 +271,33 @@ impl Stream for LanMouseListener {
     }
 }
 
+/// Buffer size for receiving - large enough for clipboard messages
+const RECV_BUF_SIZE: usize = 65536 + 5 + MAX_EVENT_SIZE;
+
 async fn read_loop(
     conns: Rc<AsyncMutex<Vec<(SocketAddr, ArcConn)>>>,
     addr: SocketAddr,
     conn: ArcConn,
     dtls_tx: Sender<ListenEvent>,
 ) -> Result<(), Error> {
-    let mut b = [0u8; MAX_EVENT_SIZE];
+    let mut b = [0u8; RECV_BUF_SIZE];
 
-    while conn.recv(&mut b).await.is_ok() {
-        match b.try_into() {
+    while let Ok(n) = conn.recv(&mut b).await {
+        // Check for clipboard message
+        #[cfg(feature = "clipboard")]
+        if n >= 5 && b[0] == crate::clipboard::CLIPBOARD_MSG_TYPE {
+            if let Some(text) = crate::clipboard::decode_clipboard_msg(&b[..n]) {
+                dtls_tx
+                    .send(ListenEvent::ClipboardText { text, addr })
+                    .expect("channel closed");
+            }
+            continue;
+        }
+        // Pad short messages to MAX_EVENT_SIZE for the protocol parser
+        let mut fixed_buf = [0u8; MAX_EVENT_SIZE];
+        let copy_len = n.min(MAX_EVENT_SIZE);
+        fixed_buf[..copy_len].copy_from_slice(&b[..copy_len]);
+        match fixed_buf.try_into() {
             Ok(event) => dtls_tx
                 .send(ListenEvent::Msg { event, addr })
                 .expect("channel closed"),

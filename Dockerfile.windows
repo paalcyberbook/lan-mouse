@@ -1,0 +1,205 @@
+# Multi-stage Dockerfile for cross-compiling lan-mouse to Windows
+
+# ============================================================
+# Stage 1: Build pe-util
+# ============================================================
+FROM fedora:42 AS pe-util
+RUN dnf install -y git cmake gcc-c++ boost-devel && dnf clean all
+WORKDIR /root
+RUN git clone https://github.com/gsauthof/pe-util && \
+    cd pe-util && git submodule update --init && \
+    mkdir build && cd build && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release && make
+
+# ============================================================
+# Stage 2: Build NATIVE versions of libfyaml, libxmlb, appstream
+# (needed as build-time tools for cross-compiling appstream)
+# ============================================================
+FROM fedora:42 AS native-deps
+
+RUN dnf install -y \
+    git meson ninja-build cmake gperf gcc gcc-c++ \
+    glib2-devel gobject-introspection-devel \
+    libxml2-devel libyaml-devel libzstd-devel libcurl-devel \
+    gettext-devel \
+    && dnf clean all
+
+COPY subprojects/libfyaml /tmp/libfyaml
+COPY subprojects/libxmlb /tmp/libxmlb
+COPY subprojects/appstream /tmp/appstream
+
+# Native libfyaml
+WORKDIR /tmp/libfyaml
+RUN cmake -B build -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_SHARED_LIBS=ON && \
+    cmake --build build -j$(nproc) && cmake --install build && ldconfig && \
+    mkdir -p /usr/lib64/pkgconfig && \
+    printf 'prefix=/usr\nlibdir=${prefix}/lib64\nincludedir=${prefix}/include\n\nName: libfyaml\nDescription: libfyaml\nVersion: 0.9\nLibs: -L${libdir} -lfyaml\nCflags: -I${includedir}\n' \
+        > /usr/lib64/pkgconfig/libfyaml.pc
+
+# Native libxmlb
+WORKDIR /tmp/libxmlb
+RUN meson setup build --prefix=/usr --buildtype=release --default-library=shared \
+    -Dintrospection=false -Dstemmer=false -Dgtkdoc=false -Dtests=false && \
+    ninja -C build && ninja -C build install && ldconfig
+
+# Native appstream
+WORKDIR /tmp/appstream
+RUN meson setup build --prefix=/usr --buildtype=release --default-library=shared \
+    -Dsystemd=false -Dapidocs=false -Dinstall-docs=false \
+    -Dstemming=false -Dgir=false -Dvapi=false \
+    -Dcompose=false -Dapt-support=false \
+    -Dbash-completion=false -Dman=false -Ddocs=false \
+    -Dsvg-support=false -Dqt=false && \
+    ninja -C build && ninja -C build install && ldconfig
+
+# ============================================================
+# Stage 3: Cross-compile everything for Windows (mingw)
+# ============================================================
+FROM fedora:42 AS cross-build
+
+COPY --from=pe-util /root/pe-util/build/peldd /usr/bin/peldd
+
+# Copy native appstream tools (needed for cross-build data generation)
+COPY --from=native-deps /usr/bin/appstreamcli /usr/bin/appstreamcli
+COPY --from=native-deps /usr/lib64/libappstream.so* /usr/lib64/
+COPY --from=native-deps /usr/lib64/libxmlb.so* /usr/lib64/
+COPY --from=native-deps /usr/lib64/libfyaml.so* /usr/lib64/
+COPY --from=native-deps /usr/lib64/pkgconfig/appstream.pc /usr/lib64/pkgconfig/
+COPY --from=native-deps /usr/lib64/pkgconfig/libfyaml.pc /usr/lib64/pkgconfig/
+COPY --from=native-deps /usr/lib64/pkgconfig/xmlb.pc /usr/lib64/pkgconfig/
+COPY --from=native-deps /usr/include/appstream* /usr/include/
+COPY --from=native-deps /usr/include/libxmlb* /usr/include/
+RUN ldconfig
+
+# Install mingw cross-compilation toolchain
+RUN dnf install -y \
+    git mingw64-binutils mingw64-gcc meson ninja-build cmake gperf \
+    mingw64-pango mingw64-gdk-pixbuf mingw64-libepoxy \
+    mingw64-winpthreads-static mingw64-librsvg2 \
+    mingw64-adwaita-icon-theme mingw64-gettext \
+    mingw64-graphene mingw64-cairo mingw64-fribidi \
+    mingw64-gstreamer1 mingw64-gstreamer1-plugins-bad-free \
+    mingw64-gstreamer1-plugins-base mingw64-gstreamer1-plugins-good \
+    mingw64-vulkan-loader mingw64-vulkan-headers \
+    mingw64-libjpeg-turbo mingw64-libpng mingw64-libtiff \
+    mingw64-libxml2 mingw64-glib2 mingw64-libyaml \
+    mingw64-zstd mingw64-curl \
+    glib2-devel gobject-introspection-devel \
+    appstream-devel gettext-devel \
+    glslc vulkan-headers \
+    wine dos2unix zip curl sassc \
+    && dnf clean all
+
+ENV PKG_CONFIG_ALLOW_CROSS=1
+ENV PKG_CONFIG_PATH=/usr/x86_64-w64-mingw32/sys-root/mingw/lib/pkgconfig/:/usr/x86_64-w64-mingw32/lib/pkgconfig/
+ENV MINGW_PREFIX=/usr/x86_64-w64-mingw32/sys-root/mingw
+ENV LANG="en_GB.utf8"
+
+# Case-sensitive header workarounds
+RUN cp /usr/x86_64-w64-mingw32/sys-root/mingw/include/windows.h \
+       /usr/x86_64-w64-mingw32/sys-root/mingw/include/Windows.h 2>/dev/null || true && \
+    cp /usr/x86_64-w64-mingw32/sys-root/mingw/lib/libiphlpapi.a \
+       /usr/x86_64-w64-mingw32/sys-root/mingw/lib/libIphlpapi.a 2>/dev/null || true
+
+# Copy subprojects
+COPY subprojects/libfyaml /tmp/libfyaml
+COPY subprojects/libxmlb /tmp/libxmlb
+COPY subprojects/appstream /tmp/appstream
+COPY subprojects/gtk /tmp/gtk
+COPY subprojects/libadwaita /tmp/libadwaita
+
+# Cross-compile libfyaml
+WORKDIR /tmp/libfyaml
+RUN cmake -B build \
+    -DCMAKE_SYSTEM_NAME=Windows \
+    -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc \
+    -DCMAKE_INSTALL_PREFIX=$MINGW_PREFIX \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_C_FLAGS="-I/tmp/libfyaml/src" \
+    -DCMAKE_C_STANDARD_LIBRARIES="-lws2_32 -lkernel32" \
+    -DBUILD_SHARED_LIBS=ON && \
+    cmake --build build -j$(nproc) && \
+    cmake --install build && \
+    mkdir -p $MINGW_PREFIX/lib/pkgconfig && \
+    printf 'prefix=%s\nlibdir=${prefix}/lib\nincludedir=${prefix}/include\n\nName: libfyaml\nDescription: libfyaml\nVersion: 0.9\nLibs: -L${libdir} -lfyaml\nCflags: -I${includedir}\n' \
+        "$MINGW_PREFIX" > $MINGW_PREFIX/lib/pkgconfig/libfyaml.pc
+
+# Cross-compile libxmlb
+WORKDIR /tmp/libxmlb
+RUN meson setup build --cross-file /usr/share/mingw/toolchain-mingw64.meson \
+    --prefix=$MINGW_PREFIX --buildtype=release --default-library=shared \
+    -Dintrospection=false -Dstemmer=false -Dgtkdoc=false -Dtests=false \
+    -Db_lto=false -Dc_link_args='-lssp' && \
+    ninja -C build && ninja -C build install
+
+# Cross-compile appstream
+WORKDIR /tmp/appstream
+RUN meson setup build --cross-file /usr/share/mingw/toolchain-mingw64.meson \
+    --prefix=$MINGW_PREFIX --buildtype=release --default-library=shared \
+    -Dsystemd=false -Dapidocs=false -Dinstall-docs=false \
+    -Dstemming=false -Dgir=false -Dvapi=false \
+    -Dcompose=false -Dapt-support=false \
+    -Dbash-completion=false -Dman=false -Ddocs=false \
+    -Dsvg-support=false -Dqt=false \
+    -Db_lto=false -Dc_link_args='-lssp' \
+    --wrap-mode=nodownload && \
+    ninja -C build && ninja -C build install
+
+# Cross-compile GTK4
+WORKDIR /tmp/gtk
+RUN meson setup build --cross-file /usr/share/mingw/toolchain-mingw64.meson \
+    --prefix=$MINGW_PREFIX --buildtype=release --default-library=shared \
+    -Dintrospection=disabled -Dtracker=disabled \
+    -Db_lto=false -Dc_link_args='-lssp' \
+    --wrap-mode=default && \
+    ninja -C build && ninja -C build install
+
+# Cross-compile libadwaita
+WORKDIR /tmp/libadwaita
+RUN rm -rf subprojects/*.wrap
+RUN meson setup build --cross-file /usr/share/mingw/toolchain-mingw64.meson \
+    --prefix=$MINGW_PREFIX --buildtype=release --default-library=shared \
+    -Dintrospection=disabled -Dexamples=false -Dvapi=false \
+    -Db_lto=false -Dc_link_args='-lssp' && \
+    ninja -C build && ninja -C build install
+
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --default-toolchain stable && \
+    . /root/.cargo/env && \
+    rustup target add x86_64-pc-windows-gnu
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Configure Rust cross-compilation
+RUN mkdir -p /root/.cargo && \
+    printf '[target.x86_64-pc-windows-gnu]\nlinker = "x86_64-w64-mingw32-gcc"\nar = "x86_64-w64-mingw32-gcc-ar"\n' \
+    > /root/.cargo/config.toml
+
+ENV CC_x86_64_pc_windows_gnu=x86_64-w64-mingw32-gcc
+ENV AR_x86_64_pc_windows_gnu=x86_64-w64-mingw32-gcc-ar
+
+# NSIS for building the Windows .exe installer. Added late so rebuilds of the
+# toolchain image don't have to repeat the expensive GTK/libadwaita stages.
+RUN dnf install -y mingw32-nsis && dnf clean all
+
+WORKDIR /build
+
+CMD ["bash", "-c", "\
+    set -e; \
+    PKG_CONFIG_PATH='' \
+    PKG_CONFIG_ALLOW_CROSS=1 \
+    PKG_CONFIG_PATH_x86_64_pc_windows_gnu=/usr/x86_64-w64-mingw32/sys-root/mingw/lib/pkgconfig/:/usr/x86_64-w64-mingw32/lib/pkgconfig/ \
+    cargo build --release --target x86_64-pc-windows-gnu -p lan-mouse -p lan-mouse-launcher; \
+    rm -rf /output && mkdir -p /output/bin; \
+    cp target/x86_64-pc-windows-gnu/release/lan-mouse.exe /output/bin/; \
+    cp /usr/x86_64-w64-mingw32/sys-root/mingw/bin/*.dll /output/bin/ 2>/dev/null || true; \
+    cp target/x86_64-pc-windows-gnu/release/launch-lan-mouse.exe /output/; \
+    printf 'Lan Mouse — portable build\\r\\n\\r\\nDouble-click launch-lan-mouse.exe to start.\\r\\nThe main binary and its DLLs live under the bin\\\\ folder.\\r\\n' > /output/README.txt; \
+    rm -f /build/lan-mouse-windows-x86_64.zip /build/lan-mouse-windows-x86_64-installer.exe; \
+    (cd /output && zip -r /build/lan-mouse-windows-x86_64.zip .); \
+    echo '==> Portable zip built: /build/lan-mouse-windows-x86_64.zip'; \
+    makensis -DSTAGE_DIR=/output -DOUT_FILE=/build/lan-mouse-windows-x86_64-installer.exe scripts/lan-mouse.nsi; \
+    echo '==> Installer built: /build/lan-mouse-windows-x86_64-installer.exe'; \
+"]

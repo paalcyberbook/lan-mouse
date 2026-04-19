@@ -1,7 +1,5 @@
 mod imp;
 
-use std::collections::HashMap;
-
 use adw::prelude::*;
 use adw::subclass::prelude::*;
 use glib::{Object, clone};
@@ -17,7 +15,6 @@ use lan_mouse_ipc::{
 
 use crate::{
     authorization_window::AuthorizationWindow, fingerprint_window::FingerprintWindow,
-    key_object::KeyObject, key_row::KeyRow,
 };
 
 use super::{client_object::ClientObject, client_row::ClientRow};
@@ -48,20 +45,8 @@ impl Window {
             .expect("Could not get clients")
     }
 
-    fn authorized(&self) -> gio::ListStore {
-        self.imp()
-            .authorized
-            .borrow()
-            .clone()
-            .expect("Could not get authorized")
-    }
-
     fn client_by_idx(&self, idx: u32) -> Option<ClientObject> {
         self.clients().item(idx).map(|o| o.downcast().unwrap())
-    }
-
-    fn authorized_by_idx(&self, idx: u32) -> Option<KeyObject> {
-        self.authorized().item(idx).map(|o| o.downcast().unwrap())
     }
 
     fn row_by_idx(&self, idx: i32) -> Option<ClientRow> {
@@ -70,39 +55,6 @@ impl Window {
             .get()
             .row_at_index(idx)
             .map(|o| o.downcast().expect("expected ClientRow"))
-    }
-
-    fn setup_authorized(&self) {
-        let store = gio::ListStore::new::<KeyObject>();
-        self.imp().authorized.replace(Some(store));
-        let selection_model = NoSelection::new(Some(self.authorized()));
-        self.imp().authorized_list.bind_model(
-            Some(&selection_model),
-            clone!(
-                #[weak(rename_to = window)]
-                self,
-                #[upgrade_or_panic]
-                move |obj| {
-                    let key_obj = obj.downcast_ref().expect("object of type `KeyObject`");
-                    let row = window.create_key_row(key_obj);
-                    row.connect_closure(
-                        "request-delete",
-                        false,
-                        closure_local!(
-                            #[strong]
-                            window,
-                            move |row: KeyRow| {
-                                if let Some(key_obj) = window.authorized_by_idx(row.index() as u32)
-                                {
-                                    window.request_fingerprint_remove(key_obj.get_fingerprint());
-                                }
-                            }
-                        ),
-                    );
-                    row.upcast()
-                }
-            ),
-        )
     }
 
     fn setup_clients(&self) {
@@ -249,26 +201,13 @@ impl Window {
         });
     }
 
-    fn update_auth_placeholder_visibility(&self) {
-        let visible = self.authorized().n_items() == 0;
-        let placeholder = self.imp().authorized_placeholder.get();
-        self.imp().authorized_list.set_placeholder(match visible {
-            true => Some(&placeholder),
-            false => None,
-        });
-    }
-
     fn create_client_row(&self, client_object: &ClientObject) -> ClientRow {
         let row = ClientRow::new(client_object);
         row.bind(client_object);
         row
     }
 
-    fn create_key_row(&self, key_object: &KeyObject) -> KeyRow {
-        let row = KeyRow::new();
-        row.bind(key_object);
-        row
-    }
+
 
     pub(super) fn new_client(
         &self,
@@ -418,10 +357,6 @@ impl Window {
         self.request(FrontendRequest::AuthorizeKey(desc, fp));
     }
 
-    fn request_fingerprint_remove(&self, fp: String) {
-        self.request(FrontendRequest::RemoveAuthorizedKey(fp));
-    }
-
     fn request(&self, request: FrontendRequest) {
         let mut requester = self.imp().frontend_request_writer.borrow_mut();
         let requester = requester.as_mut().unwrap();
@@ -456,20 +391,149 @@ impl Window {
             .set_visible(!capture || !emulation);
     }
 
-    pub(super) fn set_authorized_keys(&self, fingerprints: HashMap<String, String>) {
-        let authorized = self.authorized();
-        // clear list
-        authorized.remove_all();
-        // insert fingerprints
-        for (fingerprint, description) in fingerprints {
-            let key_obj = KeyObject::new(description, fingerprint);
-            authorized.append(&key_obj);
-        }
-        self.update_auth_placeholder_visibility();
-    }
-
     pub(super) fn set_pk_fp(&self, fingerprint: &str) {
         self.imp().fingerprint_row.set_subtitle(fingerprint);
+    }
+
+    pub(super) fn set_discoverable(&self, discoverable: bool) {
+        self.imp().discoverable_switch.set_active(discoverable);
+    }
+
+    pub(super) fn add_discovered_device(
+        &self,
+        hostname: &str,
+        addrs: &[std::net::IpAddr],
+        port: u16,
+        fingerprint: &str,
+        position: lan_mouse_ipc::Position,
+    ) {
+        let ip_str = addrs
+            .iter()
+            .map(|ip| ip.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let row = adw::ActionRow::builder()
+            .title(hostname)
+            .subtitle(&format!("{} (suggested: {})", ip_str, position))
+            .build();
+
+        let connect_btn = gtk::Button::builder()
+            .label("Connect")
+            .valign(gtk::Align::Center)
+            .build();
+        connect_btn.add_css_class("suggested-action");
+
+        let hostname = hostname.to_string();
+        let fingerprint = fingerprint.to_string();
+        let addrs = addrs.to_vec();
+        connect_btn.connect_clicked(clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_| {
+                let body = format!(
+                    "IPs: {}\nFingerprint: {}",
+                    addrs.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", "),
+                    fingerprint
+                );
+
+                let dialog = adw::MessageDialog::new(
+                    Some(&window),
+                    Some(&format!("Connect to {}?", hostname)),
+                    Some(&body),
+                );
+                dialog.add_response("cancel", "Cancel");
+                dialog.add_response("left", "Left");
+                dialog.add_response("right", "Right");
+                dialog.add_response("top", "Top");
+                dialog.add_response("bottom", "Bottom");
+
+                // Highlight the suggested position
+                let suggested_id = format!("{position}");
+                dialog.set_response_appearance(&suggested_id, adw::ResponseAppearance::Suggested);
+                dialog.set_default_response(Some(&suggested_id));
+                dialog.set_close_response("cancel");
+
+                let hostname = hostname.clone();
+                let fingerprint = fingerprint.clone();
+                let addrs = addrs.clone();
+                dialog.connect_response(
+                    None,
+                    clone!(
+                        #[weak]
+                        window,
+                        move |_dialog, response| {
+                            let pos = match response {
+                                "left" => lan_mouse_ipc::Position::Left,
+                                "right" => lan_mouse_ipc::Position::Right,
+                                "top" => lan_mouse_ipc::Position::Top,
+                                "bottom" => lan_mouse_ipc::Position::Bottom,
+                                _ => return,
+                            };
+                            window.request(FrontendRequest::AcceptDiscoveredDevice {
+                                hostname: hostname.clone(),
+                                addrs: addrs.clone(),
+                                port,
+                                fingerprint: fingerprint.clone(),
+                                position: pos,
+                            });
+                            window.show_toast(&format!("Connecting to {}", hostname));
+                        }
+                    ),
+                );
+                dialog.present();
+            }
+        ));
+
+        row.add_suffix(&connect_btn);
+        self.imp().discovered_list.append(&row);
+    }
+
+    pub(super) fn remove_discovered_device(&self, hostname: &str) {
+        let list = &self.imp().discovered_list;
+        let mut idx = 0;
+        while let Some(row) = list.row_at_index(idx) {
+            if let Some(action_row) = row.downcast_ref::<adw::ActionRow>() {
+                if action_row.title() == hostname {
+                    list.remove(&row);
+                    return;
+                }
+            }
+            idx += 1;
+        }
+    }
+
+    pub(super) fn set_status(&self, msg: &str) {
+        self.imp().status_label.set_text(msg);
+    }
+
+
+    pub(super) fn update_settings(&self, settings: &lan_mouse_ipc::Settings) {
+        self.imp().current_settings.replace(settings.clone());
+    }
+
+    pub(crate) fn open_settings(&self) {
+        let settings_window = crate::settings_window::SettingsWindow::new();
+        settings_window.set_transient_for(Some(self));
+
+        // Apply current settings
+        let settings = self.imp().current_settings.borrow().clone();
+        settings_window.apply_settings(&settings);
+
+        // Save settings when window is closed
+        settings_window.connect_close_request(clone!(
+            #[weak(rename_to = window)]
+            self,
+            #[upgrade_or]
+            glib::Propagation::Proceed,
+            move |settings_win| {
+                let settings = settings_win.collect_settings();
+                window.request(FrontendRequest::UpdateSettings(settings));
+                glib::Propagation::Proceed
+            }
+        ));
+
+        settings_window.present();
     }
 
     pub(super) fn request_authorization(&self, fingerprint: &str) {

@@ -52,6 +52,9 @@ pub(crate) enum EmulationEvent {
     EmulationEnabled,
     /// capture should be released
     ReleaseNotify,
+    /// clipboard text received from remote
+    #[cfg(feature = "clipboard")]
+    ClipboardReceived(String),
 }
 
 enum EmulationRequest {
@@ -59,6 +62,8 @@ enum EmulationRequest {
     Release(SocketAddr),
     ChangePort(u16),
     Terminate,
+    #[cfg(feature = "clipboard")]
+    SendClipboard(Vec<u8>),
 }
 
 impl Emulation {
@@ -92,6 +97,13 @@ impl Emulation {
     pub(crate) fn reenable(&self) {
         self.request_tx
             .send(EmulationRequest::Reenable)
+            .expect("channel closed");
+    }
+
+    #[cfg(feature = "clipboard")]
+    pub(crate) fn send_clipboard(&self, data: &[u8]) {
+        self.request_tx
+            .send(EmulationRequest::SendClipboard(data.to_vec()))
             .expect("channel closed");
     }
 
@@ -162,6 +174,11 @@ impl ListenTask {
                                 self.event_tx.send(EmulationEvent::ConnectionAttempt { fingerprint }).expect("channel closed");
                             }
                     }
+                    #[cfg(feature = "clipboard")]
+                    Some(ListenEvent::ClipboardText { text, addr }) => {
+                        log::debug!("received clipboard text ({} bytes) from {addr}", text.len());
+                        self.event_tx.send(EmulationEvent::ClipboardReceived(text)).expect("channel closed");
+                    }
                     None => break
                 }}
                 event = self.emulation_proxy.event() => {
@@ -178,6 +195,11 @@ impl ListenTask {
                         self.event_tx.send(EmulationEvent::PortChanged(result)).expect("channel closed");
                     }
                     EmulationRequest::Terminate => break,
+                    #[cfg(feature = "clipboard")]
+                    EmulationRequest::SendClipboard(data) => {
+                        // Send clipboard data to all connected incoming peers
+                        self.listener.send_raw_to_all(&data).await;
+                    }
                 },
                 _ = interval.tick() => {
                     last_response.retain(|&addr,instant| {

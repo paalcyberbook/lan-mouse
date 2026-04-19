@@ -56,6 +56,20 @@ struct ConfigToml {
     cert_path: Option<PathBuf>,
     clients: Option<Vec<TomlClient>>,
     authorized_fingerprints: Option<HashMap<String, String>>,
+    #[serde(default)]
+    discoverable_on_startup: bool,
+    #[serde(default)]
+    auto_accept_discovered: bool,
+    #[serde(default)]
+    start_minimized: bool,
+    listen_ipv4: Option<IpAddr>,
+    listen_ipv6: Option<IpAddr>,
+    #[serde(default = "default_true")]
+    ipv6_enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, Eq, PartialEq)]
@@ -362,6 +376,10 @@ impl Config {
             .parent()
             .expect("config directory")
             .to_path_buf();
+        // Ensure config directory exists before watching
+        if let Err(e) = std::fs::create_dir_all(&config_dir) {
+            log::warn!("failed to create config directory {:?}: {e}", config_dir);
+        }
         let mut config = Config {
             args,
             cert_path,
@@ -468,14 +486,68 @@ impl Config {
 
     /// set configured clients
     pub fn set_clients(&mut self, clients: Vec<ConfigClient>) {
-        if clients.is_empty() {
-            return;
-        }
         if self.config_toml.is_none() {
             self.config_toml = Some(Default::default());
         }
-        self.config_toml.as_mut().expect("config").clients =
-            Some(clients.into_iter().map(|c| c.into()).collect::<Vec<_>>());
+        self.config_toml.as_mut().expect("config").clients = if clients.is_empty() {
+            None
+        } else {
+            Some(clients.into_iter().map(|c| c.into()).collect::<Vec<_>>())
+        };
+    }
+
+    /// Returns the initial discoverable state based on the "discoverable on startup" setting.
+    /// The active toggle state is NOT persisted — it's session-only.
+    pub fn discoverable(&self) -> bool {
+        self.config_toml
+            .as_ref()
+            .map(|c| c.discoverable_on_startup)
+            .unwrap_or(false)
+    }
+
+    pub fn settings(&self) -> lan_mouse_ipc::Settings {
+        let release_bind = self
+            .release_bind()
+            .iter()
+            .map(|k| format!("{k:?}"))
+            .collect();
+        self.config_toml
+            .as_ref()
+            .map(|c| lan_mouse_ipc::Settings {
+                discoverable_on_startup: c.discoverable_on_startup,
+                auto_accept_discovered: c.auto_accept_discovered,
+                start_minimized: c.start_minimized,
+                listen_ipv4: c.listen_ipv4,
+                listen_ipv6: c.listen_ipv6,
+                ipv6_enabled: c.ipv6_enabled,
+                release_bind,
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn set_settings(&mut self, settings: &lan_mouse_ipc::Settings) {
+        if self.config_toml.is_none() {
+            self.config_toml = Some(Default::default());
+        }
+        let c = self.config_toml.as_mut().expect("config");
+        c.discoverable_on_startup = settings.discoverable_on_startup;
+        c.auto_accept_discovered = settings.auto_accept_discovered;
+        c.start_minimized = settings.start_minimized;
+        c.listen_ipv4 = settings.listen_ipv4;
+        c.listen_ipv6 = settings.listen_ipv6;
+        c.ipv6_enabled = settings.ipv6_enabled;
+    }
+
+    pub fn listen_ipv4(&self) -> Option<IpAddr> {
+        self.config_toml.as_ref().and_then(|c| c.listen_ipv4)
+    }
+
+    pub fn listen_ipv6(&self) -> Option<IpAddr> {
+        self.config_toml.as_ref().and_then(|c| c.listen_ipv6)
+    }
+
+    pub fn ipv6_enabled(&self) -> bool {
+        self.config_toml.as_ref().map(|c| c.ipv6_enabled).unwrap_or(true)
     }
 
     /// set authorized keys

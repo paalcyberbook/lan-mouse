@@ -4,6 +4,10 @@
   <requires lib="libadwaita" version="1.0"/>
   <menu id="main-menu">
     <item>
+      <attribute name="label" translatable="yes">_Settings</attribute>
+      <attribute name="action">win.open-settings</attribute>
+    </item>
+    <item>
       <attribute name="label" translatable="yes">_Close window</attribute>
       <attribute name="action">window.close</attribute>
     </item>
@@ -34,7 +38,7 @@
             <child>
               <object class="AdwStatusPage">
                 <property name="title" translatable="yes">Lan Mouse</property>
-                <property name="description" translatable="yes">easily use your mouse and keyboard on multiple computers</property>
+                <property name="description" translatable="yes">easily share your mouse, keyboard and clipboard across multiple computers</property>
                 <property name="icon-name">de.feschber.LanMouse</property>
                 <property name="child">
                   <object class="AdwClamp">
@@ -123,25 +127,25 @@
                           <object class="AdwActionRow">
                             <property name="title">hostname &#38;amp; port</property>
                             <child>
-                              <object class="GtkButton" id="copy-hostname-button">
-                                    <!--<property name="icon-name">edit-copy-symbolic</property>-->
+                              <object class="GtkBox">
+                                <property name="spacing">10</property>
                                 <property name="valign">center</property>
-                                <signal name="clicked" handler="handle_copy_hostname" swapped="true"/>
                                 <child>
-                                  <object class="GtkBox">
-                                    <property name="spacing">30</property>
-                                    <child>
-                                      <object class="GtkLabel" id="hostname_label">
-                                        <property name="label">&lt;span font_style=&quot;italic&quot; font_weight=&quot;light&quot; foreground=&quot;darkgrey&quot;&gt;could not determine hostname&lt;/span&gt;</property>
-                                        <property name="use-markup">true</property>
-                                        <property name="valign">center</property>
-                                      </object>
-                                    </child>
-                                    <child>
-                                      <object class="GtkImage" id="hostname_copy_icon">
-                                        <property name="icon-name">edit-copy-symbolic</property>
-                                      </object>
-                                    </child>
+                                  <object class="GtkLabel" id="hostname_label">
+                                    <property name="label">&lt;span font_style=&quot;italic&quot; font_weight=&quot;light&quot; foreground=&quot;darkgrey&quot;&gt;could not determine hostname&lt;/span&gt;</property>
+                                    <property name="use-markup">true</property>
+                                    <property name="valign">center</property>
+                                    <property name="has-tooltip">true</property>
+                                  </object>
+                                </child>
+                                <child>
+                                  <object class="GtkMenuButton" id="hostname_menu_button">
+                                    <property name="icon-name">edit-copy-symbolic</property>
+                                    <property name="valign">center</property>
+                                    <property name="tooltip-text">Copy address info</property>
+                                    <style>
+                                      <class name="flat"/>
+                                    </style>
                                   </object>
                                 </child>
                               </object>
@@ -196,6 +200,13 @@
                             </child>
                           </object>
                         </child>
+                        <child>
+                          <object class="AdwSwitchRow" id="discoverable_switch">
+                            <property name="title">Discoverable</property>
+                            <property name="subtitle">Allow other devices on the same local network to find this computer</property>
+                            <signal name="notify::active" handler="handle_discoverable_toggled" swapped="true"/>
+                          </object>
+                        </child>
                       </object>
                     </child>
                     <child>
@@ -232,29 +243,15 @@
                       </object>
                     </child>
                     <child>
-                      <object class="AdwPreferencesGroup">
-                        <property name="title" translatable="yes">Incoming Connections</property>
-                        <property name="header-suffix">
-                          <object class="GtkButton">
-                            <signal name="clicked" handler="handle_add_cert_fingerprint" swapped="true"/>
-                            <property name="child">
-                              <object class="AdwButtonContent">
-                                <property name="icon-name">auth-fingerprint-symbolic</property>
-                                <property name="label" translatable="yes">Authorize</property>
-                              </object>
-                            </property>
-                            <style>
-                              <class name="flat"/>
-                            </style>
-                          </object>
-                        </property>
+                      <object class="AdwPreferencesGroup" id="discovered_group">
+                        <property name="title" translatable="yes">Discovered Devices</property>
                         <child>
-                          <object class="GtkListBox" id="authorized_list">
+                          <object class="GtkListBox" id="discovered_list">
                             <property name="selection-mode">none</property>
                             <child type="placeholder">
-                              <object class="AdwActionRow" id="authorized_placeholder">
-                                <property name="title">no devices registered!</property>
-                                <property name="subtitle">authorize a new device via the "Authorize" button</property>
+                              <object class="AdwActionRow" id="discovered_placeholder">
+                                <property name="title">No devices found</property>
+                                <property name="subtitle">devices with "Discoverable" enabled will appear here</property>
                               </object>
                             </child>
                             <style>
@@ -262,6 +259,18 @@
                             </style>
                           </object>
                         </child>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkLabel" id="status_label">
+                        <property name="label">Ready</property>
+                        <property name="halign">center</property>
+                        <property name="margin-top">6</property>
+                        <property name="margin-bottom">6</property>
+                        <style>
+                          <class name="dim-label"/>
+                          <class name="caption"/>
+                        </style>
                       </object>
                     </child>
                     </object>

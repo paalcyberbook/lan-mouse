@@ -1,6 +1,9 @@
 use crate::client::ClientManager;
 use lan_mouse_ipc::{ClientHandle, DEFAULT_PORT};
 use lan_mouse_proto::{MAX_EVENT_SIZE, ProtoEvent};
+
+/// Buffer size for receiving - large enough for clipboard messages
+const RECV_BUF_SIZE: usize = 65536 + 5 + MAX_EVENT_SIZE; // clipboard + header + margin
 use local_channel::mpsc::{Receiver, Sender, channel};
 use std::{
     cell::RefCell,
@@ -47,8 +50,14 @@ async fn connect(
     cert: Certificate,
 ) -> Result<(Arc<dyn Conn + Sync + Send>, SocketAddr), (SocketAddr, LanMouseConnectionError)> {
     log::info!("connecting to {addr} ...");
+    // Bind to matching address family for the target
+    let bind_addr = if addr.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
     let conn = Arc::new(
-        UdpSocket::bind("0.0.0.0:0")
+        UdpSocket::bind(bind_addr)
             .await
             .map_err(|e| (addr, e.into()))?,
     );
@@ -91,6 +100,12 @@ async fn connect_any(
     }
 }
 
+pub(crate) enum ConnEvent {
+    Proto((ClientHandle, ProtoEvent)),
+    #[cfg(feature = "clipboard")]
+    Clipboard(String),
+}
+
 pub(crate) struct LanMouseConnection {
     cert: Certificate,
     client_manager: ClientManager,
@@ -98,26 +113,77 @@ pub(crate) struct LanMouseConnection {
     connecting: Rc<Mutex<HashSet<ClientHandle>>>,
     recv_rx: Receiver<(ClientHandle, ProtoEvent)>,
     recv_tx: Sender<(ClientHandle, ProtoEvent)>,
+    #[cfg(feature = "clipboard")]
+    clipboard_rx: Receiver<String>,
+    #[cfg(feature = "clipboard")]
+    clipboard_tx: Sender<String>,
     ping_response: Rc<RefCell<HashSet<SocketAddr>>>,
+    ipv6_enabled: bool,
 }
 
 impl LanMouseConnection {
-    pub(crate) fn new(cert: Certificate, client_manager: ClientManager) -> Self {
+    pub(crate) fn new(cert: Certificate, client_manager: ClientManager, ipv6_enabled: bool) -> Self {
         let (recv_tx, recv_rx) = channel();
+        #[cfg(feature = "clipboard")]
+        let (clipboard_tx, clipboard_rx) = channel();
         Self {
             cert,
             client_manager,
+            ipv6_enabled,
             conns: Default::default(),
             connecting: Default::default(),
             recv_rx,
             recv_tx,
+            #[cfg(feature = "clipboard")]
+            clipboard_rx,
+            #[cfg(feature = "clipboard")]
+            clipboard_tx,
             ping_response: Default::default(),
         }
     }
 
-    pub(crate) async fn recv(&mut self) -> (ClientHandle, ProtoEvent) {
-        self.recv_rx.recv().await.expect("channel closed")
+    /// Poll both the proto-event and (when enabled) clipboard-text channels
+    /// in a single borrow. Needed because callers with a `&mut self` to the
+    /// connection can't hold two outstanding mut borrows across branches of a
+    /// `tokio::select!`.
+    pub(crate) async fn recv_any(&mut self) -> ConnEvent {
+        #[cfg(feature = "clipboard")]
+        {
+            tokio::select! {
+                ev = self.recv_rx.recv() => ConnEvent::Proto(ev.expect("channel closed")),
+                text = self.clipboard_rx.recv() => ConnEvent::Clipboard(text.expect("channel closed")),
+            }
+        }
+        #[cfg(not(feature = "clipboard"))]
+        {
+            ConnEvent::Proto(self.recv_rx.recv().await.expect("channel closed"))
+        }
     }
+
+    /// Send raw bytes to the active connection for a client (used for clipboard)
+    #[cfg(feature = "clipboard")]
+    pub(crate) async fn send_raw(
+        &self,
+        data: &[u8],
+        handle: ClientHandle,
+    ) -> Result<(), LanMouseConnectionError> {
+        if let Some(addr) = self.client_manager.active_addr(handle) {
+            let conn = {
+                let conns = self.conns.lock().await;
+                conns.get(&addr).cloned()
+            };
+            if let Some(conn) = conn {
+                match conn.send(data).await {
+                    Ok(_) => return Ok(()),
+                    Err(e) => {
+                        log::warn!("failed to send clipboard to {addr}: {e}");
+                    }
+                }
+            }
+        }
+        Err(LanMouseConnectionError::NotConnected)
+    }
+
 
     pub(crate) async fn send(
         &self,
@@ -159,7 +225,10 @@ impl LanMouseConnection {
                 self.conns.clone(),
                 self.connecting.clone(),
                 self.recv_tx.clone(),
+                #[cfg(feature = "clipboard")]
+                self.clipboard_tx.clone(),
                 self.ping_response.clone(),
+                self.ipv6_enabled,
             ));
         }
         Err(LanMouseConnectionError::NotConnected)
@@ -173,7 +242,9 @@ async fn connect_to_handle(
     conns: Rc<Mutex<HashMap<SocketAddr, Arc<dyn Conn + Send + Sync>>>>,
     connecting: Rc<Mutex<HashSet<ClientHandle>>>,
     tx: Sender<(ClientHandle, ProtoEvent)>,
+    #[cfg(feature = "clipboard")] clipboard_tx: Sender<String>,
     ping_response: Rc<RefCell<HashSet<SocketAddr>>>,
+    ipv6_enabled: bool,
 ) -> Result<(), LanMouseConnectionError> {
     log::info!("client {handle} connecting ...");
     // sending did not work, figure out active conn.
@@ -181,6 +252,7 @@ async fn connect_to_handle(
         let port = client_manager.get_port(handle).unwrap_or(DEFAULT_PORT);
         let addrs = addrs
             .into_iter()
+            .filter(|a| ipv6_enabled || a.is_ipv4())
             .map(|a| SocketAddr::new(a, port))
             .collect::<Vec<_>>();
         log::info!("client ({handle}) connecting ... (ips: {addrs:?})");
@@ -208,6 +280,8 @@ async fn connect_to_handle(
             conn,
             conns,
             tx,
+            #[cfg(feature = "clipboard")]
+            clipboard_tx,
             ping_response.clone(),
         ));
         return Ok(());
@@ -251,11 +325,25 @@ async fn receive_loop(
     conn: Arc<dyn Conn + Send + Sync>,
     conns: Rc<Mutex<HashMap<SocketAddr, Arc<dyn Conn + Send + Sync>>>>,
     tx: Sender<(ClientHandle, ProtoEvent)>,
+    #[cfg(feature = "clipboard")] clipboard_tx: Sender<String>,
     ping_response: Rc<RefCell<HashSet<SocketAddr>>>,
 ) {
-    let mut buf = [0u8; MAX_EVENT_SIZE];
-    while conn.recv(&mut buf).await.is_ok() {
-        if let Ok(event) = buf.try_into() {
+    let mut buf = [0u8; RECV_BUF_SIZE];
+    while let Ok(n) = conn.recv(&mut buf).await {
+        // Check for clipboard message (sentinel byte 0xFF)
+        #[cfg(feature = "clipboard")]
+        if n >= 5 && buf[0] == crate::clipboard::CLIPBOARD_MSG_TYPE {
+            if let Some(text) = crate::clipboard::decode_clipboard_msg(&buf[..n]) {
+                log::debug!("received clipboard text ({} bytes) from {addr}", text.len());
+                clipboard_tx.send(text).expect("clipboard channel closed");
+            }
+            continue;
+        }
+        // Pad short messages to MAX_EVENT_SIZE for the protocol parser
+        let mut fixed_buf = [0u8; MAX_EVENT_SIZE];
+        let copy_len = n.min(MAX_EVENT_SIZE);
+        fixed_buf[..copy_len].copy_from_slice(&buf[..copy_len]);
+        if let Ok(event) = fixed_buf.try_into() {
             log::trace!("{addr} <==<==<== {event}");
             match event {
                 ProtoEvent::Pong(b) => {

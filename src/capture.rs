@@ -14,7 +14,7 @@ use local_channel::mpsc::{Receiver, Sender, channel};
 use tokio::task::{JoinHandle, spawn_local};
 use tokio_util::sync::CancellationToken;
 
-use crate::connect::LanMouseConnection;
+use crate::connect::{ConnEvent, LanMouseConnection};
 
 pub(crate) struct Capture {
     cancellation_token: CancellationToken,
@@ -37,6 +37,10 @@ pub(crate) enum ICaptureEvent {
     /// either the remote client leaving its device region,
     /// a new device entering the screen or the release bind.
     ClientEntered(u64),
+    /// clipboard text received from the remote client
+    /// over the outgoing connection
+    #[cfg(feature = "clipboard")]
+    ClipboardReceived(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,6 +65,9 @@ enum CaptureRequest {
     Reenable,
     /// set release bind
     SetReleaseBind(Vec<scancode::Linux>),
+    /// send clipboard data to active client
+    #[cfg(feature = "clipboard")]
+    SendClipboard(Vec<u8>),
 }
 
 impl Capture {
@@ -82,6 +89,8 @@ impl Capture {
             request_rx,
             release_bind: Rc::new(RefCell::new(release_bind)),
             state: Default::default(),
+            #[cfg(feature = "clipboard")]
+            pending_clipboard: Default::default(),
         };
         let task = spawn_local(capture_task.run());
         Self {
@@ -90,6 +99,13 @@ impl Capture {
             task,
             event_rx,
         }
+    }
+
+    #[cfg(feature = "clipboard")]
+    pub(crate) fn send_clipboard(&self, data: &[u8]) {
+        self.request_tx
+            .send(CaptureRequest::SendClipboard(data.to_vec()))
+            .expect("channel closed");
     }
 
     pub(crate) fn reenable(&self) {
@@ -166,6 +182,13 @@ struct CaptureTask {
     release_bind: Rc<RefCell<Vec<scancode::Linux>>>,
     request_rx: Receiver<CaptureRequest>,
     state: State,
+    /// Clipboard bytes queued for the first `ProtoEvent::Ack` from a client.
+    /// When the cursor enters a client, the service fires the sync-on-enter
+    /// before the DTLS handshake has finished; `send_raw` returns
+    /// `NotConnected` and the payload is lost. Stash it here so we can flush
+    /// it as soon as the connection is acknowledged.
+    #[cfg(feature = "clipboard")]
+    pending_clipboard: std::collections::HashMap<CaptureHandle, Vec<u8>>,
 }
 
 impl CaptureTask {
@@ -214,6 +237,8 @@ impl CaptureTask {
                         CaptureRequest::SetReleaseBind(bind) => {
                             self.release_bind.borrow_mut().clone_from(&bind);
                         }
+                        #[cfg(feature = "clipboard")]
+                        CaptureRequest::SendClipboard(_) => { /* not connected */ }
                     },
                     _ = self.cancellation_token.cancelled() => return,
                 }
@@ -270,27 +295,36 @@ impl CaptureTask {
                     Some(event) => self.handle_capture_event(capture, event?).await?,
                     None => return Ok(()),
                 },
-                (handle, event) = self.conn.recv() => {
-                    if let Some(active) = self.active_client {
-                        if handle != active {
-                            // we only care about events coming from the client we are currently connected to
-                            // only `Ack` and `Leave` are relevant
-                            continue
+                ev = self.conn.recv_any() => match ev {
+                    ConnEvent::Proto((handle, event)) => {
+                        if let Some(active) = self.active_client {
+                            if handle != active {
+                                // only events from the currently active client matter
+                                continue
+                            }
+                        }
+                        match event {
+                            ProtoEvent::Ack(_) => {
+                                log::info!("client {handle} acknowledged the connection!");
+                                self.state = State::Sending;
+                                #[cfg(feature = "clipboard")]
+                                if let Some(data) = self.pending_clipboard.remove(&handle) {
+                                    log::info!("flushing queued clipboard to client {handle} ({} bytes)", data.len() - 5);
+                                    if let Err(e) = self.conn.send_raw(&data, handle).await {
+                                        log::warn!("flush queued clipboard failed: {e}");
+                                    }
+                                }
+                            }
+                            ProtoEvent::Leave(_) => {
+                                log::info!("releasing capture: left remote client device region");
+                                self.release_capture(capture).await?;
+                            },
+                            _ => {}
                         }
                     }
-
-                    match event {
-                        // connection acknowlegded => set state to Sending
-                        ProtoEvent::Ack(_) => {
-                            log::info!("client {handle} acknowledged the connection!");
-                            self.state = State::Sending;
-                        }
-                        // client disconnected
-                        ProtoEvent::Leave(_) => {
-                            log::info!("releasing capture: left remote client device region");
-                            self.release_capture(capture).await?;
-                        },
-                        _ => {}
+                    #[cfg(feature = "clipboard")]
+                    ConnEvent::Clipboard(text) => {
+                        let _ = self.event_tx.send(ICaptureEvent::ClipboardReceived(text));
                     }
                 },
                 e = self.request_rx.recv() => match e.expect("channel closed") {
@@ -306,6 +340,22 @@ impl CaptureTask {
                     }
                     CaptureRequest::SetReleaseBind(bind) => {
                         self.release_bind.borrow_mut().clone_from(&bind);
+                    }
+                    #[cfg(feature = "clipboard")]
+                    CaptureRequest::SendClipboard(data) => {
+                        if let Some(handle) = self.active_client {
+                            log::debug!("sending clipboard to active client {handle}");
+                            // If the DTLS connection isn't fully up yet (first enter
+                            // after startup), `send_raw` returns NotConnected.
+                            // Stash the payload so `ProtoEvent::Ack` can flush it.
+                            match self.conn.send_raw(&data, handle).await {
+                                Ok(()) => {}
+                                Err(_) => {
+                                    log::info!("queued clipboard until client {handle} acks connection");
+                                    self.pending_clipboard.insert(handle, data);
+                                }
+                            }
+                        }
                     }
                 },
                 _ = self.cancellation_token.cancelled() => break,

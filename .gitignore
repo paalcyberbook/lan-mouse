@@ -12,3 +12,12 @@ extfile.conf
 # flatpak files
 .flatpak-builder
 repo
+
+# local / per-developer
+.claude/
+_REF_/
+
+# build artifacts
+/lan-mouse-windows-x86_64.zip
+/lan-mouse-windows-x86_64-installer.exe
+/package.zip

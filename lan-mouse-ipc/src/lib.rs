@@ -217,6 +217,51 @@ pub enum FrontendEvent {
     IncomingDisconnected(SocketAddr),
     /// failed connection attempt (approval for fingerprint required)
     ConnectionAttempt { fingerprint: String },
+    /// a device was discovered on the network via mDNS
+    DiscoveredDevice {
+        hostname: String,
+        addrs: Vec<IpAddr>,
+        port: u16,
+        fingerprint: String,
+        /// the position the discoverer configured for us — we suggest the opposite
+        position: Position,
+    },
+    /// a previously discovered device is no longer available
+    DeviceLost { hostname: String },
+    /// discoverable mode changed
+    DiscoverableChanged(bool),
+    /// settings changed
+    SettingsChanged(Settings),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Settings {
+    pub discoverable_on_startup: bool,
+    pub auto_accept_discovered: bool,
+    pub start_minimized: bool,
+    pub listen_ipv4: Option<IpAddr>,
+    pub listen_ipv6: Option<IpAddr>,
+    pub ipv6_enabled: bool,
+    pub release_bind: Vec<String>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            discoverable_on_startup: false,
+            auto_accept_discovered: false,
+            start_minimized: false,
+            listen_ipv4: None,
+            listen_ipv6: None,
+            ipv6_enabled: true,
+            release_bind: vec![
+                "KeyLeftCtrl".into(),
+                "KeyLeftShift".into(),
+                "KeyLeftMeta".into(),
+                "KeyLeftAlt".into(),
+            ],
+        }
+    }
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
@@ -255,6 +300,18 @@ pub enum FrontendRequest {
     UpdateEnterHook(u64, Option<String>),
     /// save config file
     SaveConfiguration,
+    /// accept a discovered device and create a client for it
+    AcceptDiscoveredDevice {
+        hostname: String,
+        addrs: Vec<IpAddr>,
+        port: u16,
+        fingerprint: String,
+        position: Position,
+    },
+    /// toggle discoverable mode
+    SetDiscoverable(bool),
+    /// update persistent settings
+    UpdateSettings(Settings),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]

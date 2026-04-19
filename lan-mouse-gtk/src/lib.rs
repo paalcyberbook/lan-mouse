@@ -4,6 +4,7 @@ mod client_row;
 mod fingerprint_window;
 mod key_object;
 mod key_row;
+mod settings_window;
 mod window;
 
 use std::{env, process, str};
@@ -143,9 +144,25 @@ fn build_ui(app: &Application) {
                     FrontendEvent::Error(e) => window.show_toast(e.as_str()),
                     FrontendEvent::Enumerate(clients) => window.update_client_list(clients),
                     FrontendEvent::PortChanged(port, msg) => window.update_port(port, msg),
-                    FrontendEvent::CaptureStatus(s) => window.set_capture(s.into()),
-                    FrontendEvent::EmulationStatus(s) => window.set_emulation(s.into()),
-                    FrontendEvent::AuthorizedUpdated(keys) => window.set_authorized_keys(keys),
+                    FrontendEvent::CaptureStatus(s) => {
+                        let active: bool = s.into();
+                        window.set_capture(active);
+                        if active {
+                            window.set_status("Input capture enabled");
+                        } else {
+                            window.set_status("Input capture disabled");
+                        }
+                    }
+                    FrontendEvent::EmulationStatus(s) => {
+                        let active: bool = s.into();
+                        window.set_emulation(active);
+                        if active {
+                            window.set_status("Input emulation enabled");
+                        } else {
+                            window.set_status("Input emulation disabled");
+                        }
+                    }
+                    FrontendEvent::AuthorizedUpdated(_) => {} // auth handled via popup
                     FrontendEvent::PublicKeyFingerprint(fp) => window.set_pk_fp(&fp),
                     FrontendEvent::ConnectionAttempt { fingerprint } => {
                         window.request_authorization(&fingerprint);
@@ -155,6 +172,7 @@ fn build_ui(app: &Application) {
                         addr,
                     } => {
                         window.show_toast(format!("device connected: {addr}").as_str());
+                        window.set_status(&format!("Connected to {addr}"));
                     }
                     FrontendEvent::DeviceEntered {
                         fingerprint: _,
@@ -162,9 +180,33 @@ fn build_ui(app: &Application) {
                         pos,
                     } => {
                         window.show_toast(format!("device entered: {addr} ({pos})").as_str());
+                        window.set_status(&format!("Controlling device at {addr} ({pos})"));
                     }
                     FrontendEvent::IncomingDisconnected(addr) => {
                         window.show_toast(format!("{addr} disconnected").as_str());
+                        window.set_status(&format!("Disconnected from {addr}"));
+                    }
+                    FrontendEvent::DiscoveredDevice {
+                        hostname,
+                        addrs,
+                        port,
+                        fingerprint,
+                        position,
+                    } => {
+                        window.add_discovered_device(
+                            &hostname, &addrs, port, &fingerprint, position,
+                        );
+                        window.set_status(&format!("Discovered: {hostname}"));
+                    }
+                    FrontendEvent::DeviceLost { hostname } => {
+                        window.remove_discovered_device(&hostname);
+                        window.set_status(&format!("Device lost: {hostname}"));
+                    }
+                    FrontendEvent::DiscoverableChanged(discoverable) => {
+                        window.set_discoverable(discoverable);
+                    }
+                    FrontendEvent::SettingsChanged(settings) => {
+                        window.update_settings(&settings);
                     }
                 }
             }

@@ -1,0 +1,13 @@
+[package]
+name = "lan-mouse-launcher"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Tiny launcher that starts bin/lan-mouse.exe next to itself. Only meaningful on Windows."
+
+[[bin]]
+name = "launch-lan-mouse"
+path = "src/main.rs"
+
+[build-dependencies]
+embed-resource = "3.0"

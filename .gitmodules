@@ -1,0 +1,17 @@
+[submodule "subprojects/gtk"]
+	path = subprojects/gtk
+	url = https://gitlab.gnome.org/GNOME/gtk.git
+[submodule "subprojects/libadwaita"]
+	path = subprojects/libadwaita
+	url = https://gitlab.gnome.org/GNOME/libadwaita.git
+[submodule "subprojects/libxmlb"]
+	path = subprojects/libxmlb
+	url = https://github.com/hughsie/libxmlb.git
+[submodule "subprojects/appstream"]
+	path = subprojects/appstream
+	url = https://github.com/paalcyberbook/appstream.git
+	branch = feature/lan-mouse-mingw-cross-build
+[submodule "subprojects/libfyaml"]
+	path = subprojects/libfyaml
+	url = https://github.com/paalcyberbook/libfyaml.git
+	branch = feature/lan-mouse-mingw-cross-build
