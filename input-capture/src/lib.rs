@@ -36,6 +36,14 @@ mod dummy;
 #[cfg(feature = "file_drop")]
 pub mod file_drop;
 
+#[cfg(all(
+    unix,
+    not(target_os = "macos"),
+    feature = "file_drop",
+    feature = "layer_shell"
+))]
+mod layer_shell_dnd;
+
 pub type CaptureHandle = u64;
 
 #[derive(Copy, Clone, Debug, PartialEq)]

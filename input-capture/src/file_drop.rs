@@ -74,36 +74,59 @@ pub trait FileDropSource: Stream<Item = FileDropEvent> + Unpin {
 pub enum FileDropBackend {
     /// Never-ready backend. Always available. Produces no events.
     Dummy,
-    // Real backends slot in here in tasks 12 and 13:
-    // #[cfg(windows)]
-    // WindowsOle,
-    // #[cfg(all(unix, feature = "layer_shell", not(target_os = "macos")))]
-    // LayerShellDataDevice,
+    /// Wayland wlroots: `zwlr_layer_shell_v1` edge surfaces + `wl_data_device`.
+    /// Works on sway, Hyprland, and other wlroots-based compositors; KWin
+    /// support depends on the compositor forwarding data_device to layer
+    /// surfaces (needs verification per the plan's Risk #1).
+    #[cfg(all(unix, feature = "layer_shell", not(target_os = "macos")))]
+    LayerShellDataDevice,
+    // Windows OLE IDropTarget slots in here in task 12.
 }
 
 impl Display for FileDropBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             FileDropBackend::Dummy => write!(f, "dummy"),
+            #[cfg(all(unix, feature = "layer_shell", not(target_os = "macos")))]
+            FileDropBackend::LayerShellDataDevice => write!(f, "layer-shell-data-device"),
         }
     }
 }
 
-/// Pick a sensible default backend for the current OS. For now only
-/// [`FileDropBackend::Dummy`] is implemented; this function exists so that
-/// tasks 12/13 can switch defaults per-OS without touching callers.
+/// Pick a sensible default backend for the current OS. On wlroots Wayland
+/// sessions we attempt the `zwlr_layer_shell_v1` + `wl_data_device` path;
+/// elsewhere (no WAYLAND_DISPLAY, non-layer-shell compositor, etc.) we
+/// fall back to [`FileDropBackend::Dummy`] which produces no events.
 pub fn auto_detect_backend() -> FileDropBackend {
+    #[cfg(all(unix, feature = "layer_shell", not(target_os = "macos")))]
+    {
+        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            return FileDropBackend::LayerShellDataDevice;
+        }
+    }
     FileDropBackend::Dummy
 }
 
 /// Instantiate a [`FileDropSource`] for the chosen backend, or auto-detect
-/// one if `None`. Infallible for now — the Dummy backend can't fail.
+/// one if `None`. Backends that fail to start (e.g. layer-shell on a
+/// compositor that doesn't implement it) transparently fall back to Dummy
+/// so the service can keep running.
 pub fn file_drop_source(backend: Option<FileDropBackend>) -> Box<dyn FileDropSource> {
     let backend = backend.unwrap_or_else(auto_detect_backend);
     match backend {
         FileDropBackend::Dummy => {
             log::info!("file-drop backend: dummy (edge drop-zone not yet implemented on this OS)");
             Box::new(DummyFileDropSource)
+        }
+        #[cfg(all(unix, feature = "layer_shell", not(target_os = "macos")))]
+        FileDropBackend::LayerShellDataDevice => {
+            if let Some(src) = crate::layer_shell_dnd::try_start() {
+                log::info!("file-drop backend: layer-shell + wl_data_device");
+                src
+            } else {
+                log::info!("file-drop backend: dummy (layer_shell_dnd startup failed)");
+                Box::new(DummyFileDropSource)
+            }
         }
     }
 }
