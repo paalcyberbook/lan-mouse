@@ -1931,6 +1931,7 @@ dependencies = [
  "wayland-protocols",
  "wayland-protocols-wlr",
  "windows",
+ "windows-core 0.61.2",
  "x11",
 ]
 

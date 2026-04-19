@@ -37,9 +37,7 @@ use futures_core::Stream;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINTL, WPARAM};
 use windows::Win32::Graphics::Gdi::{CreateSolidBrush, HBRUSH};
-use windows::Win32::System::Com::{
-    DVASPECT_CONTENT, FORMATETC, IDataObject, STGMEDIUM, TYMED_HGLOBAL,
-};
+use windows::Win32::System::Com::{DVASPECT_CONTENT, FORMATETC, IDataObject, TYMED_HGLOBAL};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
 use windows::Win32::System::Ole::{

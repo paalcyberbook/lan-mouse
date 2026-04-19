@@ -67,11 +67,16 @@ windows = { version = "0.61.2", features = [
     "Win32_UI_WindowsAndMessaging",
     # file_drop: OLE IDropTarget drop-target thread
     "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
     "Win32_System_Ole",
     "Win32_System_Memory",
     "Win32_System_SystemServices",
     "Win32_UI_Shell",
 ] }
+# The `#[implement]` macro on the `windows` crate expands to code that
+# references `::windows_core::…` directly, so we need it as a named dep
+# even though `windows::core` re-exports the same items.
+windows-core = "0.61"
 
 [features]
 default = ["layer_shell", "x11", "libei"]
