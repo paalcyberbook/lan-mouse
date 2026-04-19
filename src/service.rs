@@ -5,6 +5,7 @@ use crate::file_transfer::{self, FileTransferService};
 use crate::{
     capture::{Capture, CaptureType, ICaptureEvent},
     client::ClientManager,
+    clipboard_event::ClipboardChange,
     config::{Config, ConfigClient},
     connect::LanMouseConnection,
     crypto,
@@ -83,7 +84,15 @@ pub struct Service {
     #[cfg(feature = "clipboard")]
     clipboard_monitor: Option<crate::clipboard::ClipboardMonitor>,
     /// clipboard change receiver
-    clipboard_rx: local_channel::mpsc::Receiver<String>,
+    clipboard_rx: local_channel::mpsc::Receiver<ClipboardChange>,
+    /// Oversize clipboard text awaiting the user's Send/Truncate/Ignore
+    /// decision. Latest change wins if the user takes long enough for the
+    /// clipboard to change again.
+    #[cfg(feature = "clipboard")]
+    pending_clipboard_overflow: Option<String>,
+    /// PNG-encoded clipboard image awaiting the user's Send/Skip decision.
+    #[cfg(feature = "clipboard")]
+    pending_clipboard_image: Option<Vec<u8>>,
     /// mDNS discovery event receiver
     discovery_rx: local_channel::mpsc::Receiver<FrontendEvent>,
     /// mDNS discovery service
@@ -113,6 +122,27 @@ struct Incoming {
     fingerprint: String,
     addr: SocketAddr,
     pos: Position,
+}
+
+/// Write `content` to a session-scoped temp file under `$XDG_RUNTIME_DIR`
+/// (or `/tmp` as a fallback). Used by the clipboard-as-file bridge so the
+/// on-disk handoff doesn't leak into the user's real filesystem. Returns
+/// the path, or `None` on any I/O error.
+#[cfg(all(feature = "clipboard", feature = "file_drop"))]
+fn write_clipboard_temp(content: &[u8], ext: &'static str) -> Option<std::path::PathBuf> {
+    let base = std::env::var("XDG_RUNTIME_DIR")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("lan-mouse");
+    std::fs::create_dir_all(&base).ok()?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    let path = base.join(format!("clipboard-{ts}.{ext}"));
+    std::fs::write(&path, content).ok()?;
+    Some(path)
 }
 
 /// Select-loop arm for the optional file-transfer service. Returns a future
@@ -211,14 +241,14 @@ impl Service {
                 }
                 Err(e) => {
                     log::warn!("clipboard sharing unavailable: {e}");
-                    let (_, rx) = local_channel::mpsc::channel::<String>();
+                    let (_, rx) = local_channel::mpsc::channel::<ClipboardChange>();
                     (None, rx)
                 }
             }
         };
         #[cfg(not(feature = "clipboard"))]
         let clipboard_rx = {
-            let (_, rx) = local_channel::mpsc::channel::<String>();
+            let (_, rx) = local_channel::mpsc::channel::<ClipboardChange>();
             rx
         };
 
@@ -303,6 +333,10 @@ impl Service {
             #[cfg(feature = "clipboard")]
             clipboard_monitor,
             clipboard_rx,
+            #[cfg(feature = "clipboard")]
+            pending_clipboard_overflow: None,
+            #[cfg(feature = "clipboard")]
+            pending_clipboard_image: None,
             discovery_rx,
             #[cfg(feature = "discovery")]
             discovery,
@@ -342,7 +376,7 @@ impl Service {
                 event = self.capture.event() => self.handle_capture_event(event),
                 event = self.resolver.event() => self.handle_resolver_event(event),
                 _ = self.config.changed() => self.handle_config_change(),
-                Some(text) = self.clipboard_rx.next() => self.handle_clipboard_changed(text),
+                Some(change) = self.clipboard_rx.next() => self.handle_clipboard_changed(change),
                 Some(event) = self.discovery_rx.next() => self.handle_discovery_event(event),
                 Some(event) = next_file_transfer_event(&mut self.file_transfer) => self.handle_file_transfer_event(event),
                 Some(event) = next_file_drop_event(&mut self.file_drop_source) => self.handle_file_drop_event(event),
@@ -356,7 +390,7 @@ impl Service {
                 event = self.capture.event() => self.handle_capture_event(event),
                 event = self.resolver.event() => self.handle_resolver_event(event),
                 _ = self.config.changed() => self.handle_config_change(),
-                Some(text) = self.clipboard_rx.next() => self.handle_clipboard_changed(text),
+                Some(change) = self.clipboard_rx.next() => self.handle_clipboard_changed(change),
                 Some(event) = self.discovery_rx.next() => self.handle_discovery_event(event),
                 r = signal::ctrl_c() => break r,
             }
@@ -444,17 +478,17 @@ impl Service {
             FrontendRequest::RespondFileOffer { xfer_id, decision } => {
                 self.handle_respond_file_offer(xfer_id, decision);
             }
-            // Clipboard bridges land in tasks 15/16. Log the decision for
-            // diagnostic purposes until then.
-            FrontendRequest::RespondClipboardOverflow { client, .. } => {
-                log::debug!(
-                    "received RespondClipboardOverflow for client={client} (clipboard bridge not yet wired)"
-                );
+            FrontendRequest::RespondClipboardOverflow { decision, .. } => {
+                #[cfg(feature = "clipboard")]
+                self.handle_respond_clipboard_overflow(decision);
+                #[cfg(not(feature = "clipboard"))]
+                let _ = decision;
             }
-            FrontendRequest::RespondClipboardImage { client, .. } => {
-                log::debug!(
-                    "received RespondClipboardImage for client={client} (clipboard bridge not yet wired)"
-                );
+            FrontendRequest::RespondClipboardImage { decision, .. } => {
+                #[cfg(feature = "clipboard")]
+                self.handle_respond_clipboard_image(decision);
+                #[cfg(not(feature = "clipboard"))]
+                let _ = decision;
             }
         }
     }
@@ -1085,17 +1119,187 @@ impl Service {
         self.notify_frontend(event);
     }
 
-    fn handle_clipboard_changed(&mut self, text: String) {
-        log::info!("clipboard changed, broadcasting ({} bytes)", text.len());
-        #[cfg(feature = "clipboard")]
-        {
-            let data = crate::clipboard::encode_clipboard_msg(&text);
-            // Send to incoming connections (when we're being controlled)
-            self.emulation.send_clipboard(&data);
-            // Send to outgoing connections (when we're controlling others)
-            self.capture.send_clipboard(&data);
+    fn handle_clipboard_changed(&mut self, change: ClipboardChange) {
+        match change {
+            ClipboardChange::Text(text) => {
+                log::info!("clipboard changed, broadcasting ({} bytes)", text.len());
+                #[cfg(feature = "clipboard")]
+                {
+                    let data = crate::clipboard::encode_clipboard_msg(&text);
+                    self.emulation.send_clipboard(&data);
+                    self.capture.send_clipboard(&data);
+                }
+                let _ = text;
+            }
+            ClipboardChange::OversizeText { content } => {
+                self.handle_clipboard_oversize(content);
+            }
+            ClipboardChange::ImagePng { png, width, height } => {
+                self.handle_clipboard_image(png, width, height);
+            }
         }
-        let _ = text;
+    }
+
+    /// Stash the oversize text and prompt the sender-side frontend.
+    #[cfg(feature = "clipboard")]
+    fn handle_clipboard_oversize(&mut self, content: String) {
+        let bytes = content.len() as u64;
+        let preview = content.chars().take(120).collect::<String>();
+        let target_client = self.active_transfer_target_handle().unwrap_or(0);
+        self.pending_clipboard_overflow = Some(content);
+        self.notify_frontend(FrontendEvent::ClipboardOverflow {
+            client: target_client,
+            bytes,
+            preview,
+        });
+    }
+
+    /// Fallback path when the `clipboard` feature is disabled — we never
+    /// get `OversizeText` events, so this is effectively dead, but it keeps
+    /// `handle_clipboard_changed` uniformly callable.
+    #[cfg(not(feature = "clipboard"))]
+    fn handle_clipboard_oversize(&mut self, _content: String) {}
+
+    #[cfg(feature = "clipboard")]
+    fn handle_clipboard_image(&mut self, png: Vec<u8>, width: u32, height: u32) {
+        let bytes = png.len() as u64;
+        let target_client = self.active_transfer_target_handle().unwrap_or(0);
+        self.pending_clipboard_image = Some(png);
+        self.notify_frontend(FrontendEvent::ClipboardImageDetected {
+            client: target_client,
+            bytes,
+            width,
+            height,
+        });
+    }
+
+    #[cfg(not(feature = "clipboard"))]
+    fn handle_clipboard_image(&mut self, _png: Vec<u8>, _width: u32, _height: u32) {}
+
+    /// Handle the sender-side response to a `ClipboardOverflow` prompt.
+    #[cfg(feature = "clipboard")]
+    fn handle_respond_clipboard_overflow(
+        &mut self,
+        decision: lan_mouse_ipc::ClipboardOverflowDecision,
+    ) {
+        use lan_mouse_ipc::ClipboardOverflowDecision as D;
+        let Some(content) = self.pending_clipboard_overflow.take() else {
+            log::debug!("RespondClipboardOverflow with no pending content (already acted on?)");
+            return;
+        };
+        match decision {
+            D::Send => {
+                self.send_clipboard_as_file(&content.into_bytes(), "txt");
+            }
+            D::Truncate => {
+                // Legacy behaviour: truncate at the inline cap and sync.
+                let truncated = {
+                    let s = &content[..];
+                    let max = crate::clipboard::MAX_CLIPBOARD_SIZE.min(s.len());
+                    // Keep the truncation on a char boundary so we don't
+                    // mid-split a UTF-8 sequence.
+                    let mut cut = max;
+                    while cut > 0 && !s.is_char_boundary(cut) {
+                        cut -= 1;
+                    }
+                    s[..cut].to_string()
+                };
+                let data = crate::clipboard::encode_clipboard_msg(&truncated);
+                self.emulation.send_clipboard(&data);
+                self.capture.send_clipboard(&data);
+                if let Some(m) = &self.clipboard_monitor {
+                    m.note_text(&truncated);
+                }
+            }
+            D::Ignore => {
+                log::debug!("clipboard overflow ignored by user");
+            }
+        }
+    }
+
+    #[cfg(feature = "clipboard")]
+    fn handle_respond_clipboard_image(&mut self, decision: lan_mouse_ipc::ClipboardImageDecision) {
+        use lan_mouse_ipc::ClipboardImageDecision as D;
+        let Some(png) = self.pending_clipboard_image.take() else {
+            log::debug!("RespondClipboardImage with no pending content");
+            return;
+        };
+        match decision {
+            D::Send => self.send_clipboard_as_file(&png, "png"),
+            D::Skip => log::debug!("clipboard image skipped by user"),
+        }
+    }
+
+    /// Write the given bytes to a session-scoped temp file and dispatch a
+    /// file-transfer SendPath targeting the currently-active client. The
+    /// temp file lives in `$XDG_RUNTIME_DIR/lan-mouse/` (tmpfs, auto-purged
+    /// on logout). Dead code without the `file_drop` feature since there's
+    /// no QUIC channel to route through.
+    #[cfg(all(feature = "clipboard", feature = "file_drop"))]
+    fn send_clipboard_as_file(&self, content: &[u8], ext: &'static str) {
+        let Some(ft) = &self.file_transfer else {
+            log::warn!("clipboard-as-file dropped: file-transfer service unavailable");
+            return;
+        };
+        let Some((target_addr, fingerprint)) = self.active_transfer_target() else {
+            log::warn!("clipboard-as-file dropped: no active client with a known fingerprint");
+            return;
+        };
+        let Some(path) = write_clipboard_temp(content, ext) else {
+            log::warn!("failed to write clipboard temp file");
+            return;
+        };
+        log::info!(
+            "routing clipboard ({} bytes) → {target_addr} via temp file {path:?}",
+            content.len()
+        );
+        ft.try_send_command(file_transfer::Command::SendPath {
+            target_addr,
+            target_fingerprint: fingerprint,
+            root: path,
+        });
+    }
+
+    #[cfg(all(feature = "clipboard", not(feature = "file_drop")))]
+    fn send_clipboard_as_file(&self, _content: &[u8], _ext: &'static str) {
+        log::warn!("clipboard-as-file requires the file_drop feature; rebuild with it enabled");
+    }
+
+    /// Find an active client and the `(QUIC addr, fingerprint)` pair needed
+    /// to initiate a transfer to it. Returns `None` if no client is active
+    /// or its fingerprint hasn't been observed from a previous incoming
+    /// connection.
+    #[cfg(all(feature = "clipboard", feature = "file_drop"))]
+    fn active_transfer_target(&self) -> Option<(SocketAddr, String)> {
+        for (_, _, state) in self.client_manager.get_client_states() {
+            if !state.active {
+                continue;
+            }
+            let addr = state
+                .active_addr
+                .or_else(|| state.ips.iter().next().map(|ip| SocketAddr::new(*ip, 0)))?;
+            let fingerprint = self
+                .incoming_conn_info
+                .values()
+                .find(|i| i.addr.ip() == addr.ip())
+                .map(|i| i.fingerprint.clone())?;
+            let quic_addr = SocketAddr::new(addr.ip(), self.config.file_transfer_port());
+            return Some((quic_addr, fingerprint));
+        }
+        None
+    }
+
+    /// Pure-lookup variant that returns the active client's handle — used
+    /// when we only want to populate the `client:` field of an IPC event
+    /// without having to resolve the fingerprint.
+    #[cfg(feature = "clipboard")]
+    fn active_transfer_target_handle(&self) -> Option<ClientHandle> {
+        for (h, _, state) in self.client_manager.get_client_states() {
+            if state.active {
+                return Some(h);
+            }
+        }
+        None
     }
 
     fn set_discoverable(&mut self, discoverable: bool) {

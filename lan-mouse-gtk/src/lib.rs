@@ -236,12 +236,24 @@ fn build_ui(app: &Application) {
                     FrontendEvent::FileTransferFinished { xfer_id, result } => {
                         window.show_file_transfer_finished_toast(xfer_id, result);
                     }
-                    // Clipboard bridges (tasks 15/16) still log-only.
-                    FrontendEvent::ClipboardOverflow { bytes, .. } => {
-                        log::info!("clipboard overflow ({bytes} B); UI not yet wired");
+                    FrontendEvent::ClipboardOverflow {
+                        client,
+                        bytes,
+                        preview,
+                    } => {
+                        file_transfer_window::present_clipboard_overflow_prompt(
+                            &window, client, bytes, preview,
+                        );
                     }
-                    FrontendEvent::ClipboardImageDetected { width, height, .. } => {
-                        log::info!("clipboard image detected ({width}x{height}); UI not yet wired");
+                    FrontendEvent::ClipboardImageDetected {
+                        client,
+                        bytes,
+                        width,
+                        height,
+                    } => {
+                        file_transfer_window::present_clipboard_image_prompt(
+                            &window, client, bytes, width, height,
+                        );
                     }
                 }
             }

@@ -3,6 +3,7 @@ pub mod capture_test;
 pub mod client;
 #[cfg(feature = "clipboard")]
 pub(crate) mod clipboard;
+pub(crate) mod clipboard_event;
 pub mod config;
 mod connect;
 mod crypto;

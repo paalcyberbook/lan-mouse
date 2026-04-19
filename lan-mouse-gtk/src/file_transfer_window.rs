@@ -27,7 +27,9 @@ use gtk::glib;
 use gtk::glib::clone;
 use serde::{Deserialize, Serialize};
 
-use lan_mouse_ipc::{FileDecision, FrontendRequest};
+use lan_mouse_ipc::{
+    ClientHandle, ClipboardImageDecision, ClipboardOverflowDecision, FileDecision, FrontendRequest,
+};
 
 use crate::window::Window;
 
@@ -192,6 +194,111 @@ fn persist_last_dir(dir: &Path) {
     let mut state = load_state();
     state.last_download_dir = Some(dir.to_path_buf());
     save_state(&state);
+}
+
+/// Prompt the user when a clipboard copy exceeds the inline sync cap: offer
+/// to route it through the file-transfer channel, truncate to the cap, or
+/// ignore.
+pub fn present_clipboard_overflow_prompt(
+    window: &Window,
+    client: ClientHandle,
+    bytes: u64,
+    preview: String,
+) {
+    let title = format!("Clipboard too large ({})", pretty_bytes(bytes));
+    let preview_line = preview.lines().next().unwrap_or("").trim();
+    let body = if preview_line.is_empty() {
+        "Send as a file or keep the legacy 64 KB-truncated sync?".into()
+    } else {
+        format!(
+            "Starts with: \"{}\"\n\nSend as a file or keep the legacy 64 KB-truncated sync?",
+            ellipsize(preview_line, 80)
+        )
+    };
+    let dialog = adw::MessageDialog::new(Some(window), Some(&title), Some(&body));
+    dialog.add_response("ignore", "Ignore");
+    dialog.add_response("truncate", "Truncate to 64 KB");
+    dialog.add_response("send", "Send as file");
+    dialog.set_response_appearance("send", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("send"));
+    dialog.set_close_response("ignore");
+
+    dialog.connect_response(
+        None,
+        clone!(
+            #[weak]
+            window,
+            move |_, resp| {
+                let decision = match resp {
+                    "send" => ClipboardOverflowDecision::Send,
+                    "truncate" => ClipboardOverflowDecision::Truncate,
+                    _ => ClipboardOverflowDecision::Ignore,
+                };
+                window
+                    .crate_request(FrontendRequest::RespondClipboardOverflow { client, decision });
+            }
+        ),
+    );
+    dialog.present();
+}
+
+/// Prompt the user when a clipboard image is detected: send as PNG or skip.
+pub fn present_clipboard_image_prompt(
+    window: &Window,
+    client: ClientHandle,
+    bytes: u64,
+    width: u32,
+    height: u32,
+) {
+    let title = if width > 0 && height > 0 {
+        format!(
+            "Copied image {}×{} ({})",
+            width,
+            height,
+            pretty_bytes(bytes)
+        )
+    } else {
+        format!("Copied image ({})", pretty_bytes(bytes))
+    };
+    let body = "Send this image as a PNG to the active remote client?";
+    let dialog = adw::MessageDialog::new(Some(window), Some(&title), Some(body));
+    dialog.add_response("skip", "Skip");
+    dialog.add_response("send", "Send as PNG");
+    dialog.set_response_appearance("send", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("send"));
+    dialog.set_close_response("skip");
+
+    dialog.connect_response(
+        None,
+        clone!(
+            #[weak]
+            window,
+            move |_, resp| {
+                let decision = match resp {
+                    "send" => ClipboardImageDecision::Send,
+                    _ => ClipboardImageDecision::Skip,
+                };
+                window.crate_request(FrontendRequest::RespondClipboardImage { client, decision });
+            }
+        ),
+    );
+    dialog.present();
+}
+
+fn ellipsize(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut out = String::new();
+        for (i, c) in s.chars().enumerate() {
+            if i + 1 >= max {
+                out.push('…');
+                break;
+            }
+            out.push(c);
+        }
+        out
+    }
 }
 
 impl Window {
