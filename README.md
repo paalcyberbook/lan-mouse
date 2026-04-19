@@ -29,6 +29,86 @@ Focus lies on performance, ease of use and a maintainable implementation that ca
 Lan Mouse encrypts all network traffic using the DTLS implementation provided by [WebRTC.rs](https://github.com/webrtc-rs/webrtc).
 There are currently no mitigations in place for timing side-channel attacks.
 
+File transfer (see below) uses a separate QUIC connection with TLS 1.3 via
+`rustls`, reusing the same self-signed cert and pinned-fingerprint trust
+model as DTLS — no new authorization step.
+
+## File transfer (edge drop-zone)
+
+> [!Note]
+> This is an enhancement on the `paalcyberbook/lan-mouse` fork, not yet
+> upstream.
+
+When two peers are connected, lan-mouse can move files and folders between
+them in addition to input events. Three ways to send:
+
+- **Edge drop** (Wayland wlroots — sway, Hyprland): drag a file from your
+  file manager toward the screen edge that borders the remote client. A
+  1px-wide layer-shell surface catches the drop and ships the file over
+  QUIC.
+- **Per-client drop target** (any GTK session): drag a file onto a client
+  row in the lan-mouse window. Works on GNOME, KDE, and anywhere else the
+  GTK frontend runs. Drop one file at a time.
+- **Oversize clipboard handoff**: if you copy text larger than 64 KB or a
+  clipboard image, lan-mouse prompts to route the payload through the
+  file-transfer channel instead of truncating.
+
+On the receiver, a GTK dialog appears for every incoming offer with the
+sender's fingerprint, entry count, and total size. Accept opens a folder
+picker (defaulting to `~/Downloads`, remembering your last choice in
+`$XDG_STATE_HOME/lan-mouse/state.json`). The user must always confirm —
+no silent writes.
+
+### Transport
+
+* Separate QUIC connection on `file_transfer_port` (default: main port + 1,
+  i.e. `4243`).
+* Per-file streams inside one QUIC connection; each chunk is compressed
+  with zstd (level 3) except for already-compressed formats (PNG/JPEG/zip/…)
+  where the magic-byte probe skips the wasted CPU.
+* Each transferred file is verified with a BLAKE3 hash on the receiver;
+  partial files land at `<name>.lanmouse.part` and are unlinked on error
+  or cancellation.
+* Zip-slip defense: `..` and absolute components in relative paths are
+  rejected before the receiver opens the destination file.
+
+### Configuration
+
+All file-transfer settings are optional; sensible defaults apply.
+
+```toml
+# [config.toml]
+
+# UDP port for the QUIC file-transfer channel (default: main port + 1)
+file_transfer_port = 4243
+
+# Reject incoming offers that exceed these caps (default: 64 GiB, 100 000
+# entries). Prevents runaway transfers and limits the blast radius of a
+# malicious sender.
+max_file_transfer_bytes = 68719476736
+max_file_transfer_entries = 100000
+
+# Accept every incoming transfer without a user prompt, saving to the
+# specified directory. Opt-in only; off by default. Requires both flags.
+auto_accept_file_transfers = false
+# auto_accept_dir = "/home/you/Incoming"
+```
+
+### Limitations
+
+- Wayland KWin (Plasma 6): edge drop depends on KWin forwarding
+  `wl_data_device` events to layer-shell surfaces. Unverified on current
+  stable; if edge drops don't fire, use the per-client GTK drop target.
+- GNOME: no `zwlr_layer_shell_v1`, so edge drop isn't available. Use the
+  GTK drop target.
+- Windows: edge drop is not yet implemented. Use the GTK drop target.
+- X11: file transfer works (transport is OS-agnostic), but there is no
+  edge-drop source yet.
+- Multiple files at once: Wayland edge drops support multi-file offers;
+  the GTK per-client drop target only accepts one file per drop.
+- Daisy-chaining (A → B → C): a dropped file ends at the first hop. To
+  forward it further, re-drop on the next machine.
+
 ## OS Support
 
 Most current desktop environments and operating systems are fully supported, this includes

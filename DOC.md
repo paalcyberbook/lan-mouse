@@ -75,3 +75,43 @@ This ensures that
 - b) As soon as a virtual input enters another client, lan-mouse will stop receiving events,
 which ensures clients can only be controlled directly and not indirectly through other clients.
 
+## File transfer (QUIC side channel)
+
+Input events and clipboard text (≤ 64 KB) travel over the DTLS/UDP channel
+described above. File/folder transfers and clipboard payloads that don't
+fit that cap take a separate QUIC connection on `file_transfer_port`
+(default: main port + 1).
+
+Layout:
+
+* One QUIC connection per transfer.
+* A bidirectional control stream carries CBOR `FileCtrl` messages —
+  `Offer { root, entries, total_bytes }`, `Accept`, `Decline`, `Abort`.
+* One unidirectional data stream per filesystem entry, carrying CBOR
+  `FileFrame` messages: `Entry { rel_path, size, mode, kind, compressed }`,
+  zero or more `Chunk { data }` frames, and a final
+  `EntryDone { blake3: [u8; 32] }` hash.
+
+Trust reuses the DTLS identity: `rustls` is configured with a custom
+`ClientCertVerifier`/`ServerCertVerifier` that checks the peer's SHA-256
+cert fingerprint against the same `authorized_fingerprints` map that DTLS
+consults. No PKI, no SNI check, same on-disk PEM loaded once.
+
+Each chunk is compressed with zstd level 3 unless the entry's first 16
+bytes match a known already-compressed magic (PNG, JPEG, MP4, zip, …) in
+which case compression is skipped. The receiver verifies BLAKE3 per file
+and writes to `<name>.lanmouse.part` until the hash matches, then
+atomically renames.
+
+Drop-detection (source of `FileDropEvent`) is a separate per-OS trait
+`input_capture::file_drop::FileDropSource`; backends:
+
+* `layer_shell_data_device` — wlroots Wayland, creates 1px edge surfaces
+  and listens on `wl_data_device`.
+* `dummy` — no events, used as fallback and on compositors without
+  layer-shell support.
+
+A GTK per-client drop target in the main window acts as the universal
+fallback: drag a file onto any client row to send it even without a
+working edge-drop backend.
+

@@ -1300,4 +1300,112 @@ mod tests {
             let _ = std::fs::remove_dir_all(&scratch);
         }));
     }
+
+    /// Decline path: receiver responds Decline, no file is written, the
+    /// receiver reports Cancelled, and the destination directory stays
+    /// empty. Covers the user-rejects-the-offer cleanup path.
+    #[test]
+    fn loopback_decline_rejects_cleanly() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, RwLock};
+        use tokio::runtime::Builder;
+        use tokio::task::LocalSet;
+
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        let local = LocalSet::new();
+        runtime.block_on(local.run_until(async move {
+            let scratch = std::env::temp_dir().join(format!(
+                "lan-mouse-ft-decline-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            ));
+            std::fs::create_dir_all(&scratch).unwrap();
+
+            let cert_path = scratch.join("identity.pem");
+            let cert = crypto::generate_key_and_cert(&cert_path).unwrap();
+            let fp = crypto::certificate_fingerprint(&cert);
+
+            let authorized = Arc::new(RwLock::new({
+                let mut m = HashMap::new();
+                m.insert(fp.clone(), "loopback".into());
+                m
+            }));
+            let limits = Limits {
+                max_bytes: 1024 * 1024,
+                max_entries: 100,
+            };
+
+            let mut receiver =
+                FileTransferService::start(0, false, &cert_path, authorized.clone(), limits)
+                    .await
+                    .expect("receiver start");
+            let sender =
+                FileTransferService::start(0, false, &cert_path, authorized.clone(), limits)
+                    .await
+                    .expect("sender start");
+            let recv_port = receiver.local_addr().unwrap().port();
+
+            let source_path = scratch.join("decline-me.txt");
+            std::fs::write(&source_path, b"rejected payload").unwrap();
+            let dest_dir = scratch.join("should-stay-empty");
+            std::fs::create_dir_all(&dest_dir).unwrap();
+
+            sender
+                .send_command(Command::SendPath {
+                    target_addr: (std::net::Ipv4Addr::LOCALHOST, recv_port).into(),
+                    target_fingerprint: fp.clone(),
+                    root: source_path.clone(),
+                })
+                .await;
+
+            // Drain until we see the offer, then decline.
+            let xfer_id = loop {
+                match tokio::time::timeout(Duration::from_secs(5), receiver.next_event()).await {
+                    Ok(Some(Event::IncomingOffer { xfer_id, .. })) => break xfer_id,
+                    Ok(Some(_)) => continue,
+                    Ok(None) => panic!("receiver channel closed"),
+                    Err(_) => panic!("timeout waiting for offer"),
+                }
+            };
+            receiver
+                .send_command(Command::RespondOffer {
+                    xfer_id,
+                    decision: Decision::Decline,
+                })
+                .await;
+
+            // Receiver must emit Finished{Cancelled} after the decline.
+            let mut got_terminal = false;
+            for _ in 0..10 {
+                match tokio::time::timeout(Duration::from_secs(5), receiver.next_event()).await {
+                    Ok(Some(Event::Finished {
+                        result: TransferResult::Cancelled,
+                        ..
+                    })) => {
+                        got_terminal = true;
+                        break;
+                    }
+                    Ok(Some(_)) => continue,
+                    _ => break,
+                }
+            }
+            assert!(
+                got_terminal,
+                "expected Cancelled terminal event on receiver"
+            );
+
+            // Destination directory must have no files created.
+            let entries: Vec<_> = std::fs::read_dir(&dest_dir).unwrap().collect();
+            assert!(
+                entries.is_empty(),
+                "decline should leave destination empty, got {} entries",
+                entries.len()
+            );
+
+            let _ = std::fs::remove_dir_all(&scratch);
+        }));
+    }
 }
