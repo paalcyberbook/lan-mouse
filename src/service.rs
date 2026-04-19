@@ -490,7 +490,59 @@ impl Service {
                 #[cfg(not(feature = "clipboard"))]
                 let _ = decision;
             }
+            FrontendRequest::SendFile { client, path } => {
+                #[cfg(feature = "file_drop")]
+                self.handle_send_file(client, path);
+                #[cfg(not(feature = "file_drop"))]
+                let _ = (client, path);
+            }
         }
+    }
+
+    /// Dispatch a single outgoing file transfer to the given client. Called
+    /// from the IPC `SendFile` request (GTK drop-widget fallback; CLI manual
+    /// trigger). The client must have previously connected so we know its
+    /// fingerprint.
+    #[cfg(feature = "file_drop")]
+    fn handle_send_file(&mut self, client: ClientHandle, path: std::path::PathBuf) {
+        let Some(ft) = &self.file_transfer else {
+            log::warn!("SendFile dropped: file-transfer service unavailable");
+            return;
+        };
+        let Some((target_addr, fingerprint)) = self.transfer_target_for_handle(client) else {
+            log::warn!(
+                "SendFile dropped: no known fingerprint for client {client} (peer must have previously connected)"
+            );
+            return;
+        };
+        log::info!("SendFile {path:?} → client {client} at {target_addr}");
+        ft.try_send_command(file_transfer::Command::SendPath {
+            target_addr,
+            target_fingerprint: fingerprint,
+            root: path,
+        });
+    }
+
+    /// Resolve a specific client handle to the `(QUIC addr, fingerprint)`
+    /// pair needed to initiate a transfer. Mirrors `active_transfer_target`
+    /// but keyed by handle so the GTK widget can target a specific row.
+    #[cfg(feature = "file_drop")]
+    fn transfer_target_for_handle(&self, handle: ClientHandle) -> Option<(SocketAddr, String)> {
+        let (cfg, state) = self.client_manager.get_state(handle)?;
+        let addr = state.active_addr.or_else(|| {
+            state
+                .ips
+                .iter()
+                .next()
+                .map(|ip| SocketAddr::new(*ip, cfg.port))
+        })?;
+        let fingerprint = self
+            .incoming_conn_info
+            .values()
+            .find(|i| i.addr.ip() == addr.ip())
+            .map(|i| i.fingerprint.clone())?;
+        let quic_addr = SocketAddr::new(addr.ip(), self.config.file_transfer_port());
+        Some((quic_addr, fingerprint))
     }
 
     fn save_config(&mut self) {

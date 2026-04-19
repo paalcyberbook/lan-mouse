@@ -399,6 +399,10 @@ pub enum FrontendRequest {
         client: ClientHandle,
         decision: ClipboardImageDecision,
     },
+    /// send a file or folder to a specific client. Used by the GTK
+    /// drop-widget fallback on compositors without an edge-drop source
+    /// (notably GNOME), and by the CLI for manual testing.
+    SendFile { client: ClientHandle, path: PathBuf },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]

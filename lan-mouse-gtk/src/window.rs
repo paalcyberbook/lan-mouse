@@ -177,6 +177,36 @@ impl Window {
                             }
                         ),
                     );
+                    row.connect_closure(
+                        "request-send-files",
+                        false,
+                        closure_local!(
+                            #[strong]
+                            window,
+                            move |row: ClientRow, paths: Vec<String>| {
+                                let Some(client) = window.client_by_idx(row.index() as u32) else {
+                                    return;
+                                };
+                                let handle = client.handle();
+                                let count = paths.len();
+                                for path in paths {
+                                    window.request(FrontendRequest::SendFile {
+                                        client: handle,
+                                        path: path.into(),
+                                    });
+                                }
+                                window.show_toast(&format!(
+                                    "Queued {} file(s) for {}",
+                                    count,
+                                    client
+                                        .get_data()
+                                        .hostname
+                                        .clone()
+                                        .unwrap_or_else(|| "client".into())
+                                ));
+                            }
+                        ),
+                    );
                     row.upcast()
                 }
             ),

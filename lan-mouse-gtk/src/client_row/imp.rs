@@ -5,7 +5,7 @@ use adw::{ActionRow, ComboRow, prelude::*};
 use glib::{Binding, subclass::InitializingObject};
 use gtk::glib::subclass::Signal;
 use gtk::glib::{SignalHandlerId, clone};
-use gtk::{Button, CompositeTemplate, Entry, Switch, glib};
+use gtk::{Button, CompositeTemplate, DropTarget, Entry, Switch, gdk, gio, glib};
 use lan_mouse_ipc::Position;
 use std::sync::OnceLock;
 
@@ -91,6 +91,7 @@ impl ObjectImpl for ClientRow {
             }
         ));
         self.position_change_handler.replace(Some(handler));
+        install_drop_target(self);
         let handler = self.enable_switch.connect_state_set(clone!(
             #[weak(rename_to = row)]
             self,
@@ -122,9 +123,104 @@ impl ObjectImpl for ClientRow {
                 Signal::builder("request-position-change")
                     .param_types([u32::static_type()])
                     .build(),
+                // Emitted when the user drops files onto this row. Carries
+                // an owned Vec<String> of absolute paths; the window handler
+                // turns each entry into a FrontendRequest::SendFile.
+                Signal::builder("request-send-files")
+                    .param_types([<Vec<String>>::static_type()])
+                    .build(),
             ]
         })
     }
+}
+
+/// Accept file drops onto the row and re-emit them as a
+/// `request-send-files` signal on the ClientRow. Called from `constructed`.
+///
+/// We install two drop controllers — one accepting a single `gio::File`
+/// (GTK 4.2+ universal) and one accepting plain `text/uri-list`. The
+/// first catches most file-manager drops; the URI-list fallback catches
+/// apps that only offer the MIME type. Multi-file `gdk::FileList` needs
+/// GTK 4.6 which is newer than our `v4_2` feature cap; single-file drops
+/// cover the common case and multiple files can be dropped one at a time.
+fn install_drop_target(row: &ClientRow) {
+    // Single-file drops
+    let file_target = DropTarget::new(gio::File::static_type(), gdk::DragAction::COPY);
+    file_target.connect_drop(clone!(
+        #[weak(rename_to = r)]
+        row,
+        #[upgrade_or]
+        false,
+        move |_, value, _x, _y| {
+            let Ok(file) = value.get::<gio::File>() else {
+                return false;
+            };
+            let Some(path) = file.path() else {
+                log::warn!("drop on ClientRow had no local path");
+                return false;
+            };
+            let Some(path_str) = path.into_os_string().into_string().ok() else {
+                return false;
+            };
+            r.obj()
+                .emit_by_name::<()>("request-send-files", &[&vec![path_str]]);
+            true
+        }
+    ));
+    row.obj().add_controller(file_target);
+
+    // text/uri-list fallback — handles apps that drop as MIME payload.
+    let uri_target = DropTarget::new(String::static_type(), gdk::DragAction::COPY);
+    uri_target.set_types(&[String::static_type()]);
+    uri_target.connect_drop(clone!(
+        #[weak(rename_to = r)]
+        row,
+        #[upgrade_or]
+        false,
+        move |_, value, _x, _y| {
+            let Ok(text) = value.get::<String>() else {
+                return false;
+            };
+            let paths: Vec<String> = text
+                .lines()
+                .map(|l| l.trim_end_matches(['\r', '\n']).trim().to_string())
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .filter_map(|l| l.strip_prefix("file://").map(percent_decode))
+                .collect();
+            if paths.is_empty() {
+                return false;
+            }
+            r.obj().emit_by_name::<()>("request-send-files", &[&paths]);
+            true
+        }
+    ));
+    row.obj().add_controller(uri_target);
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = |b: u8| -> Option<u8> {
+                match b {
+                    b'0'..=b'9' => Some(b - b'0'),
+                    b'a'..=b'f' => Some(b - b'a' + 10),
+                    b'A'..=b'F' => Some(b - b'A' + 10),
+                    _ => None,
+                }
+            };
+            if let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push((h << 4) | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_default()
 }
 
 #[gtk::template_callbacks]
