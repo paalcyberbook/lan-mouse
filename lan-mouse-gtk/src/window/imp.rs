@@ -1,11 +1,11 @@
 use std::cell::{Cell, RefCell};
 
+use adw::SwitchRow;
 use adw::subclass::prelude::*;
 use adw::{ActionRow, PreferencesGroup, ToastOverlay, prelude::*};
 use glib::subclass::InitializingObject;
 use gtk::glib::clone;
 use gtk::{Button, CompositeTemplate, Entry, Label, ListBox, MenuButton, gdk, gio, glib};
-use adw::SwitchRow;
 
 use lan_mouse_ipc::{DEFAULT_PORT, FrontendRequest, FrontendRequestWriter};
 
@@ -192,7 +192,6 @@ impl Window {
         self.obj().request(FrontendRequest::SetDiscoverable(active));
     }
 
-
     pub fn set_port(&self, port: u16) {
         self.port.set(port);
         if port == DEFAULT_PORT {
@@ -298,8 +297,7 @@ impl ObjectImpl for Window {
         ));
         action_group.add_action(&settings_action);
 
-        self.obj()
-            .insert_action_group("win", Some(&action_group));
+        self.obj().insert_action_group("win", Some(&action_group));
 
         self.parent_constructed();
         self.set_port(DEFAULT_PORT);

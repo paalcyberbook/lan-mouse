@@ -47,12 +47,10 @@ impl ObjectImpl for SettingsWindow {
 
         // Show/hide security warning based on auto-accept toggle
         let warning = self.auto_accept_warning.clone();
-        self.auto_accept_switch.connect_notify_local(
-            Some("active"),
-            move |switch, _| {
+        self.auto_accept_switch
+            .connect_notify_local(Some("active"), move |switch, _| {
                 warning.set_visible(switch.is_active());
-            },
-        );
+            });
 
         // Populate IPv4 dropdown
         let ipv4_list = StringList::new(&["All interfaces (0.0.0.0)"]);
@@ -97,8 +95,7 @@ impl SettingsWindow {
         self.start_minimized_switch
             .set_active(settings.start_minimized);
 
-        self.ipv6_enabled_switch
-            .set_active(settings.ipv6_enabled);
+        self.ipv6_enabled_switch.set_active(settings.ipv6_enabled);
 
         // Apply listen IPv4 selection
         if let Some(ip) = &settings.listen_ipv4 {
@@ -156,9 +153,7 @@ impl SettingsWindow {
             let model = self.listen_ipv4_combo.model().unwrap();
             let list = model.downcast_ref::<StringList>().unwrap();
             let text = list.string(self.listen_ipv4_combo.selected()).unwrap();
-            text.split(' ')
-                .next()
-                .and_then(|s| s.parse().ok())
+            text.split(' ').next().and_then(|s| s.parse().ok())
         };
 
         let listen_ipv6 = if self.listen_ipv6_combo.selected() == 0 {
@@ -167,9 +162,7 @@ impl SettingsWindow {
             let model = self.listen_ipv6_combo.model().unwrap();
             let list = model.downcast_ref::<StringList>().unwrap();
             let text = list.string(self.listen_ipv6_combo.selected()).unwrap();
-            text.split(' ')
-                .next()
-                .and_then(|s| s.parse().ok())
+            text.split(' ').next().and_then(|s| s.parse().ok())
         };
 
         Settings {

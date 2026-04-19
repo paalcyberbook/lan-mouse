@@ -1,8 +1,8 @@
 mod capture;
-#[cfg(feature = "clipboard")]
-pub(crate) mod clipboard;
 pub mod capture_test;
 pub mod client;
+#[cfg(feature = "clipboard")]
+pub(crate) mod clipboard;
 pub mod config;
 mod connect;
 mod crypto;

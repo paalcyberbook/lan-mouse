@@ -122,7 +122,11 @@ pub(crate) struct LanMouseConnection {
 }
 
 impl LanMouseConnection {
-    pub(crate) fn new(cert: Certificate, client_manager: ClientManager, ipv6_enabled: bool) -> Self {
+    pub(crate) fn new(
+        cert: Certificate,
+        client_manager: ClientManager,
+        ipv6_enabled: bool,
+    ) -> Self {
         let (recv_tx, recv_rx) = channel();
         #[cfg(feature = "clipboard")]
         let (clipboard_tx, clipboard_rx) = channel();
@@ -183,7 +187,6 @@ impl LanMouseConnection {
         }
         Err(LanMouseConnectionError::NotConnected)
     }
-
 
     pub(crate) async fn send(
         &self,

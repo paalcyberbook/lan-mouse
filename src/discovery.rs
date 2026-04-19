@@ -179,8 +179,7 @@ impl DiscoveryService {
                             .unwrap_or_default()
                             .opposite();
 
-                        let addrs: Vec<IpAddr> =
-                            info.get_addresses().iter().copied().collect();
+                        let addrs: Vec<IpAddr> = info.get_addresses().iter().copied().collect();
 
                         if fingerprint.is_empty() {
                             continue;
@@ -188,11 +187,7 @@ impl DiscoveryService {
 
                         known_devices.insert(remote_hostname.clone(), Instant::now());
 
-                        log::info!(
-                            "mDNS: discovered device: {} ({:?})",
-                            remote_hostname,
-                            addrs
-                        );
+                        log::info!("mDNS: discovered device: {} ({:?})", remote_hostname, addrs);
 
                         event_tx
                             .send(FrontendEvent::DiscoveredDevice {

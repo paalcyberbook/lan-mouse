@@ -74,6 +74,14 @@ notify = "8.2.0"
 mdns-sd = { version = "0.12", optional = true }
 arboard = { version = "3", optional = true }
 
+# file_drop feature deps (QUIC side channel + clipboard-image-as-file bridge)
+quinn = { version = "0.11", default-features = false, features = ["rustls-ring", "runtime-tokio"], optional = true }
+zstd = { version = "0.13", optional = true }
+ciborium = { version = "0.2", optional = true }
+blake3 = { version = "1", optional = true }
+png = { version = "0.17", optional = true }
+rustls-pemfile = { version = "2", optional = true }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.148"
 
@@ -97,6 +105,7 @@ default = [
     "x11_emulation",
     "discovery",
     "clipboard",
+    "file_drop",
 ]
 gtk = ["dep:lan-mouse-gtk"]
 layer_shell_capture = ["input-capture/layer_shell"]
@@ -108,6 +117,14 @@ x11_emulation = ["input-emulation/x11"]
 rdp_emulation = ["input-emulation/remote_desktop_portal"]
 discovery = ["dep:mdns-sd"]
 clipboard = ["dep:arboard"]
+file_drop = [
+    "dep:quinn",
+    "dep:zstd",
+    "dep:ciborium",
+    "dep:blake3",
+    "dep:png",
+    "dep:rustls-pemfile",
+]
 
 [package.metadata.bundle]
 name = "Lan Mouse"

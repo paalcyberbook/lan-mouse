@@ -194,7 +194,11 @@ fn build_ui(app: &Application) {
                         position,
                     } => {
                         window.add_discovered_device(
-                            &hostname, &addrs, port, &fingerprint, position,
+                            &hostname,
+                            &addrs,
+                            port,
+                            &fingerprint,
+                            position,
                         );
                         window.set_status(&format!("Discovered: {hostname}"));
                     }
@@ -207,6 +211,21 @@ fn build_ui(app: &Application) {
                     }
                     FrontendEvent::SettingsChanged(settings) => {
                         window.update_settings(&settings);
+                    }
+                    // File-transfer + clipboard-bridge events: UX lands in a
+                    // follow-up (task 10 of the edge-drop-zone plan).
+                    FrontendEvent::FileOfferIncoming { xfer_id, .. } => {
+                        log::info!("file offer {xfer_id} received; UI not yet wired");
+                    }
+                    FrontendEvent::FileTransferProgress { .. } => {}
+                    FrontendEvent::FileTransferFinished { xfer_id, .. } => {
+                        log::info!("file transfer {xfer_id} finished");
+                    }
+                    FrontendEvent::ClipboardOverflow { bytes, .. } => {
+                        log::info!("clipboard overflow ({bytes} B); UI not yet wired");
+                    }
+                    FrontendEvent::ClipboardImageDetected { width, height, .. } => {
+                        log::info!("clipboard image detected ({width}x{height}); UI not yet wired");
                     }
                 }
             }

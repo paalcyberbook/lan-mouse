@@ -4,15 +4,13 @@ use std::{
     fmt::Display,
     io,
     net::{IpAddr, SocketAddr},
+    path::PathBuf,
     str::FromStr,
 };
 use thiserror::Error;
 
 #[cfg(unix)]
-use std::{
-    env,
-    path::{Path, PathBuf},
-};
+use std::{env, path::Path};
 
 use serde::{Deserialize, Serialize};
 
@@ -232,6 +230,80 @@ pub enum FrontendEvent {
     DiscoverableChanged(bool),
     /// settings changed
     SettingsChanged(Settings),
+    /// incoming file / folder transfer offer awaiting user decision on the receiver
+    FileOfferIncoming {
+        xfer_id: u64,
+        client: ClientHandle,
+        root_name: String,
+        entries: u32,
+        total_bytes: u64,
+        fingerprint: String,
+    },
+    /// progress update for an accepted transfer (receiver-side UI)
+    FileTransferProgress {
+        xfer_id: u64,
+        bytes: u64,
+        total: u64,
+        entries_done: u32,
+        entries_total: u32,
+        current_entry: Option<String>,
+    },
+    /// a transfer terminated (success, user cancel, or error)
+    FileTransferFinished {
+        xfer_id: u64,
+        result: TransferResult,
+    },
+    /// the local clipboard text exceeded the 64 KiB sync cap; ask the sender
+    /// whether to ship it as a file instead
+    ClipboardOverflow {
+        client: ClientHandle,
+        bytes: u64,
+        preview: String,
+    },
+    /// an image was placed on the local clipboard; ask the sender whether to
+    /// encode it as PNG and ship it
+    ClipboardImageDetected {
+        client: ClientHandle,
+        bytes: u64,
+        width: u32,
+        height: u32,
+    },
+}
+
+/// Sender's decision on an incoming `FileOfferIncoming` — accept with a
+/// destination directory, or decline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileDecision {
+    Accept { dest_dir: PathBuf },
+    Decline,
+}
+
+/// Terminal state of a file transfer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransferResult {
+    Ok { destination: PathBuf },
+    Cancelled,
+    Error(String),
+}
+
+/// Sender's decision when clipboard text exceeds the 64 KiB cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClipboardOverflowDecision {
+    /// ship the full payload as a file via the file-transfer channel
+    Send,
+    /// keep existing behavior: truncate to 64 KiB and sync as text
+    Truncate,
+    /// skip this clipboard change; do not re-prompt until content changes again
+    Ignore,
+}
+
+/// Sender's decision on a detected clipboard image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClipboardImageDecision {
+    /// encode as PNG and ship via the file-transfer channel
+    Send,
+    /// skip; do not re-prompt until the image changes
+    Skip,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,6 +384,21 @@ pub enum FrontendRequest {
     SetDiscoverable(bool),
     /// update persistent settings
     UpdateSettings(Settings),
+    /// receiver's response to a `FileOfferIncoming`
+    RespondFileOffer {
+        xfer_id: u64,
+        decision: FileDecision,
+    },
+    /// sender's response to a `ClipboardOverflow` prompt
+    RespondClipboardOverflow {
+        client: ClientHandle,
+        decision: ClipboardOverflowDecision,
+    },
+    /// sender's response to a `ClipboardImageDetected` prompt
+    RespondClipboardImage {
+        client: ClientHandle,
+        decision: ClipboardImageDecision,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]

@@ -66,6 +66,20 @@ struct ConfigToml {
     listen_ipv6: Option<IpAddr>,
     #[serde(default = "default_true")]
     ipv6_enabled: bool,
+    /// UDP port for the QUIC-based file-transfer side channel.
+    /// Defaults to `DEFAULT_PORT + 1` (i.e. 4243 when main port is 4242).
+    file_transfer_port: Option<u16>,
+    /// Maximum total bytes per transfer. Generous default (64 GiB). Incoming
+    /// offers larger than this are rejected before the user sees the prompt.
+    max_file_transfer_bytes: Option<u64>,
+    /// Maximum entries (files + dirs) per transfer. Default 100_000.
+    max_file_transfer_entries: Option<u32>,
+    /// If true AND `auto_accept_dir` is set, incoming file offers are accepted
+    /// without user interaction and stored under `auto_accept_dir`. Off by
+    /// default — user must confirm every transfer.
+    #[serde(default)]
+    auto_accept_file_transfers: bool,
+    auto_accept_dir: Option<PathBuf>,
 }
 
 fn default_true() -> bool {
@@ -547,7 +561,52 @@ impl Config {
     }
 
     pub fn ipv6_enabled(&self) -> bool {
-        self.config_toml.as_ref().map(|c| c.ipv6_enabled).unwrap_or(true)
+        self.config_toml
+            .as_ref()
+            .map(|c| c.ipv6_enabled)
+            .unwrap_or(true)
+    }
+
+    /// UDP port for the QUIC-based file-transfer side channel.
+    /// Defaults to the main `port() + 1` so it lives next door to DTLS.
+    pub fn file_transfer_port(&self) -> u16 {
+        self.config_toml
+            .as_ref()
+            .and_then(|c| c.file_transfer_port)
+            .unwrap_or_else(|| self.port().saturating_add(1))
+    }
+
+    /// Hard cap on total bytes per incoming transfer. Defaults to 64 GiB.
+    pub fn max_file_transfer_bytes(&self) -> u64 {
+        self.config_toml
+            .as_ref()
+            .and_then(|c| c.max_file_transfer_bytes)
+            .unwrap_or(64 * 1024 * 1024 * 1024)
+    }
+
+    /// Hard cap on entries (files + directories) per incoming transfer. Defaults to 100 000.
+    pub fn max_file_transfer_entries(&self) -> u32 {
+        self.config_toml
+            .as_ref()
+            .and_then(|c| c.max_file_transfer_entries)
+            .unwrap_or(100_000)
+    }
+
+    /// Directory to store auto-accepted transfers in, only applied when
+    /// [`Self::auto_accept_file_transfers`] is true.
+    pub fn auto_accept_dir(&self) -> Option<PathBuf> {
+        self.config_toml
+            .as_ref()
+            .and_then(|c| c.auto_accept_dir.clone())
+    }
+
+    /// If true AND an `auto_accept_dir` is configured, incoming file offers are
+    /// accepted without prompting. Off by default.
+    pub fn auto_accept_file_transfers(&self) -> bool {
+        self.config_toml
+            .as_ref()
+            .map(|c| c.auto_accept_file_transfers && c.auto_accept_dir.is_some())
+            .unwrap_or(false)
     }
 
     /// set authorized keys

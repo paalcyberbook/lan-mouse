@@ -52,6 +52,37 @@ pub(crate) fn load_or_generate_key_and_cert(path: &Path) -> Result<Certificate, 
     }
 }
 
+/// Load the same on-disk PEM that DTLS uses and return the cert chain +
+/// private key in the shapes rustls (and therefore quinn) expects. Used by the
+/// QUIC file-transfer side channel so it shares one identity + fingerprint
+/// with the main DTLS listener.
+#[cfg(feature = "file_drop")]
+pub(crate) fn load_rustls_cert_and_key(
+    path: &Path,
+) -> Result<
+    (
+        Vec<rustls::pki_types::CertificateDer<'static>>,
+        rustls::pki_types::PrivateKeyDer<'static>,
+    ),
+    Error,
+> {
+    let mut pem = Vec::new();
+    File::open(path)?.read_to_end(&mut pem)?;
+
+    let certs = rustls_pemfile::certs(&mut pem.as_slice()).collect::<Result<Vec<_>, _>>()?;
+    if certs.is_empty() {
+        return Err(Error::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "no certificates found in PEM",
+        )));
+    }
+
+    let key = rustls_pemfile::private_key(&mut pem.as_slice())?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no private key found in PEM"))?;
+
+    Ok((certs, key))
+}
+
 pub(crate) fn generate_key_and_cert(path: &Path) -> Result<Certificate, Error> {
     let cert = Certificate::generate_self_signed(["ignored".to_owned()])?;
     let serialized = cert.serialize_pem();

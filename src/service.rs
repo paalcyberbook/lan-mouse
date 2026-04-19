@@ -1,3 +1,5 @@
+#[cfg(feature = "discovery")]
+use crate::discovery::DiscoveryService;
 use crate::{
     capture::{Capture, CaptureType, ICaptureEvent},
     client::ClientManager,
@@ -8,8 +10,6 @@ use crate::{
     emulation::{Emulation, EmulationEvent},
     listen::{LanMouseListener, ListenerCreationError},
 };
-#[cfg(feature = "discovery")]
-use crate::discovery::DiscoveryService;
 use futures::StreamExt;
 use hickory_resolver::ResolveError;
 use lan_mouse_ipc::{
@@ -118,21 +118,32 @@ impl Service {
         if ipv6_enabled {
             log::info!(
                 "listening on IPv4: {}, IPv6: {}, port: {}",
-                listen_ipv4.map(|ip| ip.to_string()).unwrap_or_else(|| "all (0.0.0.0)".into()),
-                listen_ipv6.map(|ip| ip.to_string()).unwrap_or_else(|| "all ([::])" .into()),
+                listen_ipv4
+                    .map(|ip| ip.to_string())
+                    .unwrap_or_else(|| "all (0.0.0.0)".into()),
+                listen_ipv6
+                    .map(|ip| ip.to_string())
+                    .unwrap_or_else(|| "all ([::])".into()),
                 config.port()
             );
         } else {
             log::info!(
                 "listening on IPv4: {}, IPv6: disabled, port: {}",
-                listen_ipv4.map(|ip| ip.to_string()).unwrap_or_else(|| "all (0.0.0.0)".into()),
+                listen_ipv4
+                    .map(|ip| ip.to_string())
+                    .unwrap_or_else(|| "all (0.0.0.0)".into()),
                 config.port()
             );
         }
 
         // listener + connection
-        let listener =
-            LanMouseListener::new(config.port(), cert.clone(), authorized_keys.clone(), ipv6_enabled).await?;
+        let listener = LanMouseListener::new(
+            config.port(),
+            cert.clone(),
+            authorized_keys.clone(),
+            ipv6_enabled,
+        )
+        .await?;
         let conn = LanMouseConnection::new(cert.clone(), client_manager.clone(), ipv6_enabled);
 
         // input capture + emulation
@@ -175,7 +186,12 @@ impl Service {
                 .and_then(|h| h.to_str().map(|s| s.to_string()))
                 .unwrap_or_else(|| "lan-mouse".to_string());
             let discoverable = config.discoverable();
-            match DiscoveryService::new(port, public_key_fingerprint.clone(), hostname, discoverable) {
+            match DiscoveryService::new(
+                port,
+                public_key_fingerprint.clone(),
+                hostname,
+                discoverable,
+            ) {
                 Ok((d, rx)) => {
                     log::info!("mDNS discovery enabled (discoverable: {discoverable})");
                     (Some(d), rx)
@@ -326,6 +342,23 @@ impl Service {
             FrontendRequest::UpdateSettings(settings) => {
                 self.update_settings(settings);
             }
+            // File-transfer + clipboard-bridge responses: wired in a follow-up
+            // (tasks 9, 15, 16 of the edge-drop-zone plan).
+            FrontendRequest::RespondFileOffer { xfer_id, .. } => {
+                log::debug!(
+                    "received RespondFileOffer for xfer_id={xfer_id} (ignored — transport not yet wired)"
+                );
+            }
+            FrontendRequest::RespondClipboardOverflow { client, .. } => {
+                log::debug!(
+                    "received RespondClipboardOverflow for client={client} (ignored — clipboard bridge not yet wired)"
+                );
+            }
+            FrontendRequest::RespondClipboardImage { client, .. } => {
+                log::debug!(
+                    "received RespondClipboardImage for client={client} (ignored — clipboard bridge not yet wired)"
+                );
+            }
         }
     }
 
@@ -396,7 +429,10 @@ impl Service {
                 // If discoverable is on, auto-authorize incoming connection attempts
                 #[cfg(feature = "discovery")]
                 if self.discovery.as_ref().is_some_and(|d| d.is_discoverable()) {
-                    log::info!("auto-authorizing incoming connection: {}", &fingerprint[..16]);
+                    log::info!(
+                        "auto-authorizing incoming connection: {}",
+                        &fingerprint[..16]
+                    );
                     self.add_authorized_key("discovered-peer".into(), fingerprint.clone());
                     self.save_config();
                 }
@@ -484,7 +520,10 @@ impl Service {
                 if let Some(ref monitor) = self.clipboard_monitor {
                     let clip = monitor.get_current_text();
                     if !clip.is_empty() {
-                        log::info!("syncing clipboard to client on enter ({} bytes)", clip.len());
+                        log::info!(
+                            "syncing clipboard to client on enter ({} bytes)",
+                            clip.len()
+                        );
                         let data = crate::clipboard::encode_clipboard_msg(&clip);
                         self.capture.send_clipboard(&data);
                     }
@@ -492,7 +531,10 @@ impl Service {
             }
             #[cfg(feature = "clipboard")]
             ICaptureEvent::ClipboardReceived(text) => {
-                log::info!("clipboard received from remote client ({} bytes)", text.len());
+                log::info!(
+                    "clipboard received from remote client ({} bytes)",
+                    text.len()
+                );
                 if let Some(ref clipboard) = self.clipboard_monitor {
                     clipboard.set_text(&text);
                 }
@@ -788,7 +830,11 @@ impl Service {
 
     fn handle_discovery_event(&mut self, event: lan_mouse_ipc::FrontendEvent) {
         match &event {
-            FrontendEvent::DiscoveredDevice { hostname, fingerprint, .. } => {
+            FrontendEvent::DiscoveredDevice {
+                hostname,
+                fingerprint,
+                ..
+            } => {
                 // Auto-authorize discovered devices' fingerprints so connections work immediately
                 if !fingerprint.is_empty() {
                     let keys = self.authorized_keys.read().expect("lock");
@@ -801,7 +847,8 @@ impl Service {
                 }
                 // Cache the event so it can be re-emitted if a matching
                 // connection is later deleted.
-                self.discovered_devices.insert(hostname.clone(), event.clone());
+                self.discovered_devices
+                    .insert(hostname.clone(), event.clone());
                 // Filter: suppress if a connection already exists for this hostname.
                 if self.hostname_has_client(hostname) {
                     log::debug!(

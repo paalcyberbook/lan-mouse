@@ -13,9 +13,7 @@ use lan_mouse_ipc::{
     Position,
 };
 
-use crate::{
-    authorization_window::AuthorizationWindow, fingerprint_window::FingerprintWindow,
-};
+use crate::{authorization_window::AuthorizationWindow, fingerprint_window::FingerprintWindow};
 
 use super::{client_object::ClientObject, client_row::ClientRow};
 
@@ -206,8 +204,6 @@ impl Window {
         row.bind(client_object);
         row
     }
-
-
 
     pub(super) fn new_client(
         &self,
@@ -433,7 +429,11 @@ impl Window {
             move |_| {
                 let body = format!(
                     "IPs: {}\nFingerprint: {}",
-                    addrs.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", "),
+                    addrs
+                        .iter()
+                        .map(|a| a.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", "),
                     fingerprint
                 );
 
@@ -506,7 +506,6 @@ impl Window {
     pub(super) fn set_status(&self, msg: &str) {
         self.imp().status_label.set_text(msg);
     }
-
 
     pub(super) fn update_settings(&self, settings: &lan_mouse_ipc::Settings) {
         self.imp().current_settings.replace(settings.clone());

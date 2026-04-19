@@ -74,7 +74,10 @@ impl ClipboardMonitor {
                 Backend::WlClipboard => wl_paste_read().await.unwrap_or_default(),
                 Backend::Arboard => {
                     if let Some(ref a) = poll_arboard {
-                        a.lock().ok().and_then(|mut c| c.get_text().ok()).unwrap_or_default()
+                        a.lock()
+                            .ok()
+                            .and_then(|mut c| c.get_text().ok())
+                            .unwrap_or_default()
                     } else {
                         String::new()
                     }
@@ -91,7 +94,10 @@ impl ClipboardMonitor {
                     Backend::WlClipboard => wl_paste_read().await.unwrap_or_default(),
                     Backend::Arboard => {
                         if let Some(ref a) = poll_arboard {
-                            a.lock().ok().and_then(|mut c| c.get_text().ok()).unwrap_or_default()
+                            a.lock()
+                                .ok()
+                                .and_then(|mut c| c.get_text().ok())
+                                .unwrap_or_default()
                         } else {
                             String::new()
                         }
@@ -146,7 +152,10 @@ impl ClipboardMonitor {
         // the text back over the network.
         if let Ok(mut cached) = self.last_text.lock() {
             if *cached == text {
-                log::debug!("clipboard from remote matches local ({} bytes), skipping", text.len());
+                log::debug!(
+                    "clipboard from remote matches local ({} bytes), skipping",
+                    text.len()
+                );
                 return false;
             }
             *cached = text.to_string();
