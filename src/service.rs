@@ -145,6 +145,19 @@ fn write_clipboard_temp(content: &[u8], ext: &'static str) -> Option<std::path::
     Some(path)
 }
 
+/// Map an IPC `Position` into the `input-capture` equivalent. The two
+/// types are structurally identical but live in distinct crates; this
+/// bridge keeps the conversion in one place.
+#[cfg(feature = "file_drop")]
+fn ipc_pos_to_capture(pos: Position) -> input_capture::Position {
+    match pos {
+        Position::Left => input_capture::Position::Left,
+        Position::Right => input_capture::Position::Right,
+        Position::Top => input_capture::Position::Top,
+        Position::Bottom => input_capture::Position::Bottom,
+    }
+}
+
 /// Select-loop arm for the optional file-transfer service. Returns a future
 /// that either yields the next event or, if the service is not running,
 /// stays pending forever.
@@ -363,6 +376,13 @@ impl Service {
         for handle in active {
             self.activate_client(handle);
         }
+
+        // Seed the file-drop source with the initial edges — configured
+        // clients loaded from config.toml are already in the client_manager
+        // by this point. Without this call the drop zones don't appear
+        // until the user manually adds/activates a client.
+        #[cfg(feature = "file_drop")]
+        self.refresh_file_drop_edges();
 
         // tokio::select! doesn't support `#[cfg(...)]` on arms, so two
         // near-identical blocks live here — one with the file-drop arms,
@@ -932,6 +952,29 @@ impl Service {
         None
     }
 
+    /// Recompute the set of screen edges that currently have a configured
+    /// client and push it to the [`FileDropSource`]. Called on any state
+    /// change that could add/remove/move a client (add, delete, position
+    /// update, activate, deactivate, startup).
+    ///
+    /// "Configured" is the gate rather than "active" so the drop zone is
+    /// available even before the user activates a client for input. If the
+    /// peer isn't actually connected, the transfer will fail gracefully
+    /// with a warning in [`Self::handle_file_drop_event`].
+    #[cfg(feature = "file_drop")]
+    fn refresh_file_drop_edges(&mut self) {
+        let Some(src) = self.file_drop_source.as_mut() else {
+            return;
+        };
+        let edges: std::collections::HashSet<input_capture::Position> = self
+            .client_manager
+            .get_client_states()
+            .into_iter()
+            .map(|(_, cfg, _)| ipc_pos_to_capture(cfg.pos))
+            .collect();
+        src.set_active_edges(edges);
+    }
+
     /// Route a file-drop event to the outgoing transfer path.
     ///
     /// `Entered` / `Cancelled` are advisory and are just logged for now; the
@@ -1044,6 +1087,8 @@ impl Service {
         log::info!("added client {handle}");
         let (c, s) = self.client_manager.get_state(handle).unwrap();
         self.notify_frontend(FrontendEvent::Created(handle, c, s));
+        #[cfg(feature = "file_drop")]
+        self.refresh_file_drop_edges();
     }
 
     fn set_client_active(&mut self, handle: ClientHandle, active: bool) {
@@ -1105,6 +1150,8 @@ impl Service {
             }
         }
         self.notify_frontend(FrontendEvent::Deleted(handle));
+        #[cfg(feature = "file_drop")]
+        self.refresh_file_drop_edges();
 
         // If the removed connection's hostname still matches a cached
         // discovered device (and no *other* connection uses it), re-surface it.
@@ -1155,6 +1202,8 @@ impl Service {
             self.activate_client(handle);
         }
         self.broadcast_client(handle);
+        #[cfg(feature = "file_drop")]
+        self.refresh_file_drop_edges();
     }
 
     fn update_enter_hook(&mut self, handle: ClientHandle, enter_hook: Option<String>) {

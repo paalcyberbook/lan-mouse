@@ -32,7 +32,6 @@ use std::{
     thread,
 };
 
-use async_trait::async_trait;
 use futures_core::Stream;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINTL, WPARAM};
@@ -156,20 +155,20 @@ impl Stream for WindowsDropTarget {
     }
 }
 
-#[async_trait(?Send)]
 impl FileDropSource for WindowsDropTarget {
-    async fn set_active_edges(&mut self, edges: HashSet<Position>) {
+    fn set_active_edges(&mut self, edges: HashSet<Position>) {
         {
             let mut guard = self.shared.active_edges.lock().expect("lock");
             if *guard == edges {
                 return;
             }
+            log::info!("windows drop-target: active edges = {edges:?} (was {:?})", *guard);
             *guard = edges;
         }
         self.post_signal(ThreadSignal::ReconcileEdges);
     }
 
-    async fn terminate(&mut self) {
+    fn terminate(&mut self) {
         self.post_signal(ThreadSignal::Exit);
     }
 }

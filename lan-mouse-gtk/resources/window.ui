@@ -15,7 +15,7 @@
   <template class="LanMouseWindow" parent="AdwApplicationWindow">
     <property name="width-request">600</property>
     <property name="height-request">700</property>
-    <property name="title" translatable="yes">Lan Mouse</property>
+    <property name="title" translatable="yes">Lan Mouse+</property>
     <property name="show-menubar">True</property>
     <property name="content">
       <object class="GtkBox">
@@ -37,8 +37,8 @@
           <object class="AdwToastOverlay" id="toast_overlay">
             <child>
               <object class="AdwStatusPage">
-                <property name="title" translatable="yes">Lan Mouse</property>
-                <property name="description" translatable="yes">easily share your mouse, keyboard and clipboard across multiple computers</property>
+                <property name="title" translatable="yes">Lan Mouse+</property>
+                <property name="description" translatable="yes">Share your mouse, keyboard, and clipboard across multiple computers — plus drag &amp; drop files between them</property>
                 <property name="icon-name">de.feschber.LanMouse</property>
                 <property name="child">
                   <object class="AdwClamp">

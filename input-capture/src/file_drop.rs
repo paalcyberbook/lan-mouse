@@ -22,7 +22,6 @@ use std::{
     task::{Context, Poll},
 };
 
-use async_trait::async_trait;
 use futures_core::Stream;
 
 use crate::Position;
@@ -57,16 +56,20 @@ impl Display for FileDropEvent {
 /// Source of file-drop events. Backends are responsible for showing and
 /// hiding edge overlay surfaces; the service tells them which edges are
 /// active via [`set_active_edges`](FileDropSource::set_active_edges).
-#[async_trait(?Send)]
 pub trait FileDropSource: Stream<Item = FileDropEvent> + Unpin {
-    /// Replace the set of edges currently bordering a connected remote
+    /// Replace the set of edges currently bordering a configured remote
     /// client. Backends use this to show/hide their per-edge drop-target
-    /// surfaces. Called from the service main loop whenever the set of
-    /// connected clients (or their positions) changes.
-    async fn set_active_edges(&mut self, edges: HashSet<Position>);
+    /// surfaces. Called from the service whenever the set of clients (or
+    /// their positions) changes.
+    ///
+    /// Intentionally synchronous — real backends dispatch to a separate
+    /// thread or queue (wayland object creation, `PostThreadMessageW`)
+    /// that takes care of the asynchrony, so the caller doesn't need to
+    /// pay an `.await` just to hand off a `HashSet`.
+    fn set_active_edges(&mut self, edges: HashSet<Position>);
 
     /// Clean shutdown.
-    async fn terminate(&mut self);
+    fn terminate(&mut self);
 }
 
 /// Which drag-detection backend to use.
@@ -163,10 +166,9 @@ impl Stream for DummyFileDropSource {
     }
 }
 
-#[async_trait(?Send)]
 impl FileDropSource for DummyFileDropSource {
-    async fn set_active_edges(&mut self, _edges: HashSet<Position>) {}
-    async fn terminate(&mut self) {}
+    fn set_active_edges(&mut self, _edges: HashSet<Position>) {}
+    fn terminate(&mut self) {}
 }
 
 #[cfg(test)]
@@ -177,9 +179,9 @@ mod tests {
     #[tokio::test]
     async fn dummy_source_never_emits() {
         let mut src = file_drop_source(Some(FileDropBackend::Dummy));
-        src.set_active_edges(HashSet::from([Position::Left])).await;
+        src.set_active_edges(HashSet::from([Position::Left]));
         let maybe = tokio::time::timeout(std::time::Duration::from_millis(50), src.next()).await;
         assert!(maybe.is_err(), "dummy source must remain pending");
-        src.terminate().await;
+        src.terminate();
     }
 }

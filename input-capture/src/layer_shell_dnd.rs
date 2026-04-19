@@ -27,7 +27,6 @@ use std::{
     task::{Context, Poll},
 };
 
-use async_trait::async_trait;
 use futures_core::Stream;
 use tokio::io::unix::AsyncFd;
 
@@ -370,17 +369,21 @@ impl Stream for LayerShellDnd {
     }
 }
 
-#[async_trait(?Send)]
 impl FileDropSource for LayerShellDnd {
-    async fn set_active_edges(&mut self, edges: HashSet<Position>) {
+    fn set_active_edges(&mut self, edges: HashSet<Position>) {
         if self.state.active_edges == edges {
             return;
         }
+        log::info!(
+            "layer-shell DnD: active edges = {:?} (was {:?})",
+            edges,
+            self.state.active_edges,
+        );
         self.state.active_edges = edges;
         self.reconcile_surfaces();
     }
 
-    async fn terminate(&mut self) {
+    fn terminate(&mut self) {
         for (_, e) in self.state.surfaces.drain() {
             e.surface.destroy();
         }
