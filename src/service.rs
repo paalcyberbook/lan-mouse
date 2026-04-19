@@ -14,6 +14,8 @@ use crate::{
 };
 use futures::StreamExt;
 use hickory_resolver::ResolveError;
+#[cfg(feature = "file_drop")]
+use input_capture::file_drop::{FileDropEvent, FileDropSource, file_drop_source};
 use lan_mouse_ipc::{
     AsyncFrontendListener, ClientHandle, FrontendEvent, FrontendRequest, IpcError,
     IpcListenerCreationError, Position, Status,
@@ -99,6 +101,11 @@ pub struct Service {
     /// the Sync path.
     #[cfg(feature = "file_drop")]
     pending_file_offers: HashMap<u64, FrontendEvent>,
+    /// Drag-at-edge detector. Dummy backend is a no-op; real backends
+    /// (tasks 12, 13) will emit `FileDropEvent::Dropped` when the user
+    /// releases a file at a screen edge bordering a connected client.
+    #[cfg(feature = "file_drop")]
+    file_drop_source: Option<Box<dyn FileDropSource>>,
 }
 
 #[derive(Debug)]
@@ -117,6 +124,17 @@ async fn next_file_transfer_event(
 ) -> Option<file_transfer::Event> {
     match ft {
         Some(svc) => svc.next_event().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Select-loop arm for the optional file-drop source. The dummy backend
+/// returns `Poll::Pending` forever; real backends emit `FileDropEvent`s when
+/// the user drags a file toward an active edge.
+#[cfg(feature = "file_drop")]
+async fn next_file_drop_event(src: &mut Option<Box<dyn FileDropSource>>) -> Option<FileDropEvent> {
+    match src {
+        Some(s) => s.next().await,
         None => std::future::pending().await,
     }
 }
@@ -293,6 +311,8 @@ impl Service {
             file_transfer,
             #[cfg(feature = "file_drop")]
             pending_file_offers: HashMap::new(),
+            #[cfg(feature = "file_drop")]
+            file_drop_source: Some(file_drop_source(None)),
         };
         Ok(service)
     }
@@ -311,7 +331,7 @@ impl Service {
         }
 
         // tokio::select! doesn't support `#[cfg(...)]` on arms, so two
-        // near-identical blocks live here — one with the file-transfer arm,
+        // near-identical blocks live here — one with the file-drop arms,
         // one without. Keep them in sync when adding new arms.
         let exit_signal: Result<(), io::Error> = loop {
             #[cfg(feature = "file_drop")]
@@ -325,6 +345,7 @@ impl Service {
                 Some(text) = self.clipboard_rx.next() => self.handle_clipboard_changed(text),
                 Some(event) = self.discovery_rx.next() => self.handle_discovery_event(event),
                 Some(event) = next_file_transfer_event(&mut self.file_transfer) => self.handle_file_transfer_event(event),
+                Some(event) = next_file_drop_event(&mut self.file_drop_source) => self.handle_file_drop_event(event),
                 r = signal::ctrl_c() => break r,
             }
             #[cfg(not(feature = "file_drop"))]
@@ -823,6 +844,96 @@ impl Service {
             }
         }
         None
+    }
+
+    /// Route a file-drop event to the outgoing transfer path.
+    ///
+    /// `Entered` / `Cancelled` are advisory and are just logged for now; the
+    /// real work is `Dropped`, where we resolve the target edge → active
+    /// client → (address, fingerprint) and kick off one `SendPath` command
+    /// per dropped path.
+    #[cfg(feature = "file_drop")]
+    fn handle_file_drop_event(&mut self, event: FileDropEvent) {
+        let (position, paths) = match event {
+            FileDropEvent::Entered(p) => {
+                log::debug!("drag entered {p}");
+                return;
+            }
+            FileDropEvent::Cancelled(p) => {
+                log::debug!("drag cancelled at {p}");
+                return;
+            }
+            FileDropEvent::Dropped { position, paths } => (position, paths),
+        };
+        if paths.is_empty() {
+            return;
+        }
+        let Some(ft) = &self.file_transfer else {
+            log::warn!("file drop at {position}: file-transfer service unavailable");
+            return;
+        };
+
+        let Some((target_addr, target_fp)) = self.resolve_drop_target(position) else {
+            log::warn!(
+                "file drop at {position}: no connected client at that edge (peer must have previously connected for the fingerprint to be known)"
+            );
+            return;
+        };
+
+        for path in paths {
+            log::info!("dispatching file drop {path:?} → {target_addr}");
+            ft.try_send_command(file_transfer::Command::SendPath {
+                target_addr,
+                target_fingerprint: target_fp.clone(),
+                root: path,
+            });
+        }
+    }
+
+    /// Given an input-capture edge position, resolve the active client at
+    /// that edge and return the `(target_addr, fingerprint)` pair needed by
+    /// [`file_transfer::Command::SendPath`]. Returns `None` if no active
+    /// client exists at the edge or its fingerprint is unknown.
+    ///
+    /// Fingerprint is learned from `incoming_conn_info` — i.e., the peer
+    /// must have previously established a DTLS session with us at least
+    /// once. That matches how the existing mouse-sharing trust works.
+    #[cfg(feature = "file_drop")]
+    fn resolve_drop_target(&self, edge: input_capture::Position) -> Option<(SocketAddr, String)> {
+        let ipc_pos = match edge {
+            input_capture::Position::Left => Position::Left,
+            input_capture::Position::Right => Position::Right,
+            input_capture::Position::Top => Position::Top,
+            input_capture::Position::Bottom => Position::Bottom,
+        };
+        // Find an active client configured at this position with a known
+        // recent peer address.
+        let mut candidate: Option<SocketAddr> = None;
+        for (_, cfg, state) in self.client_manager.get_client_states() {
+            if cfg.pos != ipc_pos || !state.active {
+                continue;
+            }
+            if let Some(addr) = state.active_addr {
+                candidate = Some(addr);
+                break;
+            }
+            // Fall back to the first known IP + configured port.
+            if let Some(ip) = state.ips.iter().next() {
+                candidate = Some(SocketAddr::new(*ip, cfg.port));
+            }
+        }
+        let target_addr = candidate?;
+
+        let fingerprint = self
+            .incoming_conn_info
+            .values()
+            .find(|i| i.addr.ip() == target_addr.ip())
+            .map(|i| i.fingerprint.clone())?;
+
+        // Rewrite the target port from the DTLS port to the QUIC port.
+        // We land on the QUIC endpoint for bulk transfer, not DTLS.
+        let quic_addr = SocketAddr::new(target_addr.ip(), self.config.file_transfer_port());
+        Some((quic_addr, fingerprint))
     }
 
     fn add_authorized_key(&mut self, desc: String, fp: String) {

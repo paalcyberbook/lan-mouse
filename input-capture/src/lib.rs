@@ -33,6 +33,9 @@ mod x11;
 /// fallback input capture (does not produce events)
 mod dummy;
 
+#[cfg(feature = "file_drop")]
+pub mod file_drop;
+
 pub type CaptureHandle = u64;
 
 #[derive(Copy, Clone, Debug, PartialEq)]
