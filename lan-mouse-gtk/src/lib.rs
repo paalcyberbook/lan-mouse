@@ -1,6 +1,7 @@
 mod authorization_window;
 mod client_object;
 mod client_row;
+mod file_transfer_window;
 mod fingerprint_window;
 mod key_object;
 mod key_row;
@@ -212,15 +213,30 @@ fn build_ui(app: &Application) {
                     FrontendEvent::SettingsChanged(settings) => {
                         window.update_settings(&settings);
                     }
-                    // File-transfer + clipboard-bridge events: UX lands in a
-                    // follow-up (task 10 of the edge-drop-zone plan).
-                    FrontendEvent::FileOfferIncoming { xfer_id, .. } => {
-                        log::info!("file offer {xfer_id} received; UI not yet wired");
+                    FrontendEvent::FileOfferIncoming {
+                        xfer_id,
+                        root_name,
+                        entries,
+                        total_bytes,
+                        fingerprint,
+                        ..
+                    } => {
+                        file_transfer_window::present_file_offer(
+                            &window,
+                            xfer_id,
+                            root_name,
+                            entries,
+                            total_bytes,
+                            fingerprint,
+                        );
                     }
-                    FrontendEvent::FileTransferProgress { .. } => {}
-                    FrontendEvent::FileTransferFinished { xfer_id, .. } => {
-                        log::info!("file transfer {xfer_id} finished");
+                    FrontendEvent::FileTransferProgress { xfer_id, total, .. } => {
+                        window.show_file_transfer_progress_toast(xfer_id, total);
                     }
+                    FrontendEvent::FileTransferFinished { xfer_id, result } => {
+                        window.show_file_transfer_finished_toast(xfer_id, result);
+                    }
+                    // Clipboard bridges (tasks 15/16) still log-only.
                     FrontendEvent::ClipboardOverflow { bytes, .. } => {
                         log::info!("clipboard overflow ({bytes} B); UI not yet wired");
                     }

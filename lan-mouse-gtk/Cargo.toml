@@ -15,6 +15,10 @@ if-addrs = "0.13"
 log = "0.4.20"
 lan-mouse-ipc = { path = "../lan-mouse-ipc", version = "0.2.0" }
 thiserror = "2.0.0"
+# file_transfer_window persists its last-chosen folder to a small JSON
+# state file; serde handles (de)serialization.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [build-dependencies]
 glib-build-tools = { version = "0.20.0" }

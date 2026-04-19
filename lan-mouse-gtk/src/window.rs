@@ -354,6 +354,13 @@ impl Window {
     }
 
     fn request(&self, request: FrontendRequest) {
+        self.crate_request(request);
+    }
+
+    /// Sibling of [`Self::request`] visible to other modules in this crate
+    /// (e.g. `file_transfer_window`). Kept under a distinct name so adding
+    /// this doesn't change the existing private call sites.
+    pub(crate) fn crate_request(&self, request: FrontendRequest) {
         let mut requester = self.imp().frontend_request_writer.borrow_mut();
         let requester = requester.as_mut().unwrap();
         if let Err(e) = requester.request(request) {

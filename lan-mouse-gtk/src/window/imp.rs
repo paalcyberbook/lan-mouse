@@ -1,4 +1,5 @@
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 
 use adw::SwitchRow;
 use adw::subclass::prelude::*;
@@ -59,6 +60,10 @@ pub struct Window {
     pub emulation_active: Cell<bool>,
     pub authorization_window: RefCell<Option<AuthorizationWindow>>,
     pub current_settings: RefCell<lan_mouse_ipc::Settings>,
+    /// xfer_ids for which we've already toasted "transfer started". Stops
+    /// the receiver-side UI from flooding the toast overlay at every
+    /// Progress tick.
+    pub seen_xfer_starts: RefCell<HashSet<u64>>,
 }
 
 #[glib::object_subclass]
@@ -201,6 +206,18 @@ impl Window {
         }
         self.port_edit_apply.set_visible(false);
         self.port_edit_cancel.set_visible(false);
+    }
+
+    /// Register that a given xfer_id has just started receiving. Returns
+    /// `true` the first time per xfer_id so the caller can toast exactly
+    /// once; subsequent calls return `false` until [`Self::forget_xfer`]
+    /// is invoked on the same id.
+    pub(crate) fn mark_xfer_started(&self, xfer_id: u64) -> bool {
+        self.seen_xfer_starts.borrow_mut().insert(xfer_id)
+    }
+
+    pub(crate) fn forget_xfer(&self, xfer_id: u64) {
+        self.seen_xfer_starts.borrow_mut().remove(&xfer_id);
     }
 }
 
