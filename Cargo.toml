@@ -132,6 +132,10 @@ file_drop = [
 ]
 
 [package.metadata.bundle]
-name = "Lan Mouse+"
+# macOS .app bundle name — cargo-bundle turns this into the output
+# filename, and `+` trips up some downstream tools (shells, notarisation
+# pipelines). Keep the display form "Lan Mouse Plus" here; the live UI
+# still reads "Lan Mouse+" via the desktop file / GTK title.
+name = "Lan Mouse Plus"
 icon = ["target/icon.icns"]
 identifier = "de.feschber.LanMouse"

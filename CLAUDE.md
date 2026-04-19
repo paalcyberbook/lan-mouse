@@ -12,8 +12,18 @@ rather than mirroring upstream feature-for-feature.
 - `origin` → `paalcyberbook/lan-mouse` (the fork — PRs land here)
 - `upstream` → `feschber/lan-mouse` (pull-only, for syncing)
 - Active work branch: `feature/enhanced-connectivity`
-- Display name / branding: **Lan Mouse+** (see README). The Rust package
-  is still named `lan-mouse` so crate dependencies don't churn.
+- Display name / branding: **Lan Mouse+** — use this in user-facing
+  text (README headings, GTK dialogs, desktop-file `Name=`, Windows
+  installer display, NSIS Add/Remove Programs entry).
+- Identifier form: **`lan-mouse-plus`** (lowercase, hyphenated) — use
+  this anywhere `+` trips up tooling (cargo-bundle, filenames, URL
+  paths, shell completions). The Cargo `package.metadata.bundle.name`
+  uses "Lan Mouse Plus" (no `+`) as a middle-ground filename-safe
+  variant since cargo-bundle bakes it into the .app directory name.
+- The Rust package is still named `lan-mouse` in `Cargo.toml` so
+  crate dependencies and `cargo install` don't churn.
+- Flatpak / D-Bus app-id stays `de.feschber.LanMouse` so running
+  instances aren't orphaned.
 
 When suggesting changes, prefer UX improvements and connectivity/packaging fixes over speculative refactors. Don't assume upstream parity is a goal.
 
