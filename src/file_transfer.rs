@@ -285,6 +285,16 @@ impl FileTransferService {
         let _ = self.cmd_tx.send(cmd).await;
     }
 
+    /// Non-blocking variant for use from sync handlers (the select-loop
+    /// dispatchers). Drops the command and logs if the queue is full —
+    /// should never happen in practice since the queue holds 16 entries
+    /// and file transfers are rare.
+    pub fn try_send_command(&self, cmd: Command) {
+        if let Err(e) = self.cmd_tx.try_send(cmd) {
+            log::warn!("file-transfer command dropped: {e}");
+        }
+    }
+
     pub async fn next_event(&mut self) -> Option<Event> {
         self.event_rx.recv().await
     }

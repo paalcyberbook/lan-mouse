@@ -1,5 +1,7 @@
 #[cfg(feature = "discovery")]
 use crate::discovery::DiscoveryService;
+#[cfg(feature = "file_drop")]
+use crate::file_transfer::{self, FileTransferService};
 use crate::{
     capture::{Capture, CaptureType, ICaptureEvent},
     client::ClientManager,
@@ -38,6 +40,9 @@ pub enum ServiceError {
     ListenError(#[from] ListenerCreationError),
     #[error("failed to load certificate: `{0}`")]
     Certificate(#[from] crypto::Error),
+    #[cfg(feature = "file_drop")]
+    #[error("file-transfer: {0}")]
+    FileTransfer(#[from] crate::file_transfer::FileTransferError),
 }
 
 pub struct Service {
@@ -86,6 +91,14 @@ pub struct Service {
     /// Used to filter out devices already added as connections, and to
     /// re-surface them if the corresponding connection is later deleted.
     discovered_devices: HashMap<String, FrontendEvent>,
+    /// QUIC-based file-transfer side channel
+    #[cfg(feature = "file_drop")]
+    file_transfer: Option<FileTransferService>,
+    /// Incoming file offers awaiting user decision. Keyed by xfer_id.
+    /// Retained so a late-attaching GTK frontend can be re-notified via
+    /// the Sync path.
+    #[cfg(feature = "file_drop")]
+    pending_file_offers: HashMap<u64, FrontendEvent>,
 }
 
 #[derive(Debug)]
@@ -93,6 +106,19 @@ struct Incoming {
     fingerprint: String,
     addr: SocketAddr,
     pos: Position,
+}
+
+/// Select-loop arm for the optional file-transfer service. Returns a future
+/// that either yields the next event or, if the service is not running,
+/// stays pending forever.
+#[cfg(feature = "file_drop")]
+async fn next_file_transfer_event(
+    ft: &mut Option<FileTransferService>,
+) -> Option<file_transfer::Event> {
+    match ft {
+        Some(svc) => svc.next_event().await,
+        None => std::future::pending().await,
+    }
 }
 
 impl Service {
@@ -209,6 +235,36 @@ impl Service {
             rx
         };
 
+        // initialize file-transfer side channel
+        #[cfg(feature = "file_drop")]
+        let file_transfer = {
+            let limits = file_transfer::Limits {
+                max_bytes: config.max_file_transfer_bytes(),
+                max_entries: config.max_file_transfer_entries(),
+            };
+            match FileTransferService::start(
+                config.file_transfer_port(),
+                ipv6_enabled,
+                config.cert_path(),
+                authorized_keys.clone(),
+                limits,
+            )
+            .await
+            {
+                Ok(svc) => {
+                    log::info!(
+                        "file-transfer service ready on port {}",
+                        config.file_transfer_port()
+                    );
+                    Some(svc)
+                }
+                Err(e) => {
+                    log::warn!("file-transfer service unavailable: {e}");
+                    None
+                }
+            }
+        };
+
         let service = Self {
             config,
             capture,
@@ -233,6 +289,10 @@ impl Service {
             #[cfg(feature = "discovery")]
             discovery,
             discovered_devices: HashMap::new(),
+            #[cfg(feature = "file_drop")]
+            file_transfer,
+            #[cfg(feature = "file_drop")]
+            pending_file_offers: HashMap::new(),
         };
         Ok(service)
     }
@@ -250,7 +310,11 @@ impl Service {
             self.activate_client(handle);
         }
 
-        loop {
+        // tokio::select! doesn't support `#[cfg(...)]` on arms, so two
+        // near-identical blocks live here — one with the file-transfer arm,
+        // one without. Keep them in sync when adding new arms.
+        let exit_signal: Result<(), io::Error> = loop {
+            #[cfg(feature = "file_drop")]
             tokio::select! {
                 request = self.frontend_listener.next() => self.handle_frontend_request(request),
                 _ = self.frontend_event_pending.notified() => self.handle_frontend_pending().await,
@@ -260,9 +324,23 @@ impl Service {
                 _ = self.config.changed() => self.handle_config_change(),
                 Some(text) = self.clipboard_rx.next() => self.handle_clipboard_changed(text),
                 Some(event) = self.discovery_rx.next() => self.handle_discovery_event(event),
-                r = signal::ctrl_c() => break r.expect("failed to wait for CTRL+C"),
+                Some(event) = next_file_transfer_event(&mut self.file_transfer) => self.handle_file_transfer_event(event),
+                r = signal::ctrl_c() => break r,
             }
-        }
+            #[cfg(not(feature = "file_drop"))]
+            tokio::select! {
+                request = self.frontend_listener.next() => self.handle_frontend_request(request),
+                _ = self.frontend_event_pending.notified() => self.handle_frontend_pending().await,
+                event = self.emulation.event() => self.handle_emulation_event(event),
+                event = self.capture.event() => self.handle_capture_event(event),
+                event = self.resolver.event() => self.handle_resolver_event(event),
+                _ = self.config.changed() => self.handle_config_change(),
+                Some(text) = self.clipboard_rx.next() => self.handle_clipboard_changed(text),
+                Some(event) = self.discovery_rx.next() => self.handle_discovery_event(event),
+                r = signal::ctrl_c() => break r,
+            }
+        };
+        exit_signal.expect("failed to wait for CTRL+C");
 
         log::info!("terminating service ...");
         log::debug!("terminating capture ...");
@@ -342,21 +420,19 @@ impl Service {
             FrontendRequest::UpdateSettings(settings) => {
                 self.update_settings(settings);
             }
-            // File-transfer + clipboard-bridge responses: wired in a follow-up
-            // (tasks 9, 15, 16 of the edge-drop-zone plan).
-            FrontendRequest::RespondFileOffer { xfer_id, .. } => {
-                log::debug!(
-                    "received RespondFileOffer for xfer_id={xfer_id} (ignored — transport not yet wired)"
-                );
+            FrontendRequest::RespondFileOffer { xfer_id, decision } => {
+                self.handle_respond_file_offer(xfer_id, decision);
             }
+            // Clipboard bridges land in tasks 15/16. Log the decision for
+            // diagnostic purposes until then.
             FrontendRequest::RespondClipboardOverflow { client, .. } => {
                 log::debug!(
-                    "received RespondClipboardOverflow for client={client} (ignored — clipboard bridge not yet wired)"
+                    "received RespondClipboardOverflow for client={client} (clipboard bridge not yet wired)"
                 );
             }
             FrontendRequest::RespondClipboardImage { client, .. } => {
                 log::debug!(
-                    "received RespondClipboardImage for client={client} (ignored — clipboard bridge not yet wired)"
+                    "received RespondClipboardImage for client={client} (clipboard bridge not yet wired)"
                 );
             }
         }
@@ -581,6 +657,16 @@ impl Service {
         self.notify_frontend(FrontendEvent::SettingsChanged(settings));
         let discoverable = self.config.discoverable();
         self.notify_frontend(FrontendEvent::DiscoverableChanged(discoverable));
+        // Re-emit any file-transfer offers that arrived before the frontend
+        // attached. Without this, offers queued while running headless are
+        // silently lost when the user finally opens the GTK UI.
+        #[cfg(feature = "file_drop")]
+        {
+            let replay: Vec<FrontendEvent> = self.pending_file_offers.values().cloned().collect();
+            for ev in replay {
+                self.notify_frontend(ev);
+            }
+        }
     }
 
     const ENTER_HANDLE_BEGIN: u64 = u64::MAX / 2 + 1;
@@ -644,6 +730,99 @@ impl Service {
     fn notify_frontend(&mut self, event: FrontendEvent) {
         self.pending_frontend_events.push_back(event);
         self.frontend_event_pending.notify_one();
+    }
+
+    /// Forward an event from the QUIC file-transfer service to the GTK frontend.
+    /// Incoming offers are also queued in `pending_file_offers` so a late-
+    /// attaching frontend can pick them up via the `Sync` path.
+    #[cfg(feature = "file_drop")]
+    fn handle_file_transfer_event(&mut self, event: file_transfer::Event) {
+        use lan_mouse_ipc::TransferResult as IpcResult;
+        match event {
+            file_transfer::Event::IncomingOffer {
+                xfer_id,
+                peer_addr,
+                peer_fingerprint,
+                root_name,
+                entries,
+                total_bytes,
+            } => {
+                let client = self.lookup_client_by_addr(peer_addr).unwrap_or(0);
+                let ev = FrontendEvent::FileOfferIncoming {
+                    xfer_id,
+                    client,
+                    root_name,
+                    entries,
+                    total_bytes,
+                    fingerprint: peer_fingerprint,
+                };
+                self.pending_file_offers.insert(xfer_id, ev.clone());
+                self.notify_frontend(ev);
+            }
+            file_transfer::Event::Progress {
+                xfer_id,
+                bytes,
+                total,
+                entries_done,
+                entries_total,
+                current_entry,
+            } => {
+                self.notify_frontend(FrontendEvent::FileTransferProgress {
+                    xfer_id,
+                    bytes,
+                    total,
+                    entries_done,
+                    entries_total,
+                    current_entry,
+                });
+            }
+            file_transfer::Event::Finished { xfer_id, result } => {
+                self.pending_file_offers.remove(&xfer_id);
+                let ipc = match result {
+                    file_transfer::TransferResult::Ok { destination } => {
+                        IpcResult::Ok { destination }
+                    }
+                    file_transfer::TransferResult::Cancelled => IpcResult::Cancelled,
+                    file_transfer::TransferResult::Error(e) => IpcResult::Error(e),
+                };
+                self.notify_frontend(FrontendEvent::FileTransferFinished {
+                    xfer_id,
+                    result: ipc,
+                });
+            }
+        }
+    }
+
+    /// Dispatch a user's Accept/Decline decision back into the file-transfer
+    /// service. Called from `handle_frontend_request` on `RespondFileOffer`.
+    #[cfg(feature = "file_drop")]
+    fn handle_respond_file_offer(&mut self, xfer_id: u64, decision: lan_mouse_ipc::FileDecision) {
+        self.pending_file_offers.remove(&xfer_id);
+        let Some(ft) = &self.file_transfer else {
+            log::warn!("RespondFileOffer without running file-transfer service");
+            return;
+        };
+        let decision = match decision {
+            lan_mouse_ipc::FileDecision::Accept { dest_dir } => {
+                file_transfer::Decision::Accept { dest_dir }
+            }
+            lan_mouse_ipc::FileDecision::Decline => file_transfer::Decision::Decline,
+        };
+        ft.try_send_command(file_transfer::Command::RespondOffer { xfer_id, decision });
+    }
+
+    /// Best-effort lookup of a configured client handle by its peer address.
+    /// Falls back to `None` if the peer is authorized-by-fingerprint but not
+    /// a configured client (perfectly valid; the GTK UI will fall back to the
+    /// fingerprint for display).
+    #[cfg(feature = "file_drop")]
+    fn lookup_client_by_addr(&self, addr: SocketAddr) -> Option<ClientHandle> {
+        for (h, incoming) in &self.incoming_conn_info {
+            if incoming.addr.ip() == addr.ip() {
+                return Some(*h);
+            }
+        }
+        None
     }
 
     fn add_authorized_key(&mut self, desc: String, fp: String) {
