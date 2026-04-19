@@ -66,20 +66,37 @@ pub(crate) fn load_rustls_cert_and_key(
     ),
     Error,
 > {
-    let mut pem = Vec::new();
-    File::open(path)?.read_to_end(&mut pem)?;
+    // webrtc-dtls emits PEM blocks with non-standard labels (`PRIVATE_KEY`
+    // with an underscore, not the `PRIVATE KEY` rustls_pemfile recognizes),
+    // so parse blocks manually via the `pem` crate that webrtc-dtls also
+    // uses, then re-wrap into rustls types. PKCS#8 is what webrtc-dtls/rcgen
+    // produces, so treating any "key-ish" block as PKCS#8 is sound.
+    let mut raw = Vec::new();
+    File::open(path)?.read_to_end(&mut raw)?;
+    let blocks = pem::parse_many(&raw)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("pem parse: {e}")))?;
 
-    let certs = rustls_pemfile::certs(&mut pem.as_slice()).collect::<Result<Vec<_>, _>>()?;
+    let mut certs: Vec<rustls::pki_types::CertificateDer<'static>> = Vec::new();
+    let mut key: Option<rustls::pki_types::PrivateKeyDer<'static>> = None;
+    for block in blocks {
+        let tag = block.tag().to_ascii_uppercase();
+        let contents = block.contents().to_vec();
+        if tag.contains("CERTIFICATE") {
+            certs.push(rustls::pki_types::CertificateDer::from(contents));
+        } else if tag.contains("PRIVATE") && tag.contains("KEY") && key.is_none() {
+            let pkcs8 = rustls::pki_types::PrivatePkcs8KeyDer::from(contents);
+            key = Some(rustls::pki_types::PrivateKeyDer::Pkcs8(pkcs8));
+        }
+    }
+
     if certs.is_empty() {
         return Err(Error::Io(io::Error::new(
             io::ErrorKind::InvalidData,
             "no certificates found in PEM",
         )));
     }
-
-    let key = rustls_pemfile::private_key(&mut pem.as_slice())?
+    let key = key
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no private key found in PEM"))?;
-
     Ok((certs, key))
 }
 

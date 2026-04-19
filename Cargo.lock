@@ -2120,6 +2120,7 @@ dependencies = [
  "log",
  "mdns-sd",
  "notify",
+ "pem",
  "png 0.17.16",
  "quinn",
  "rcgen",

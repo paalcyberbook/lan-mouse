@@ -81,6 +81,9 @@ ciborium = { version = "0.2", optional = true }
 blake3 = { version = "1", optional = true }
 png = { version = "0.17", optional = true }
 rustls-pemfile = { version = "2", optional = true }
+# webrtc-dtls writes keys with a non-standard PEM label (`PRIVATE_KEY`),
+# so file_drop parses the on-disk bundle via the `pem` crate directly.
+pem = { version = "3", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.148"
@@ -124,6 +127,7 @@ file_drop = [
     "dep:blake3",
     "dep:png",
     "dep:rustls-pemfile",
+    "dep:pem",
 ]
 
 [package.metadata.bundle]

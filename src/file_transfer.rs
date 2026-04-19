@@ -226,6 +226,7 @@ enum EntryKind {
 pub struct FileTransferService {
     cmd_tx: mpsc::Sender<Command>,
     event_rx: mpsc::Receiver<Event>,
+    endpoint: Endpoint,
     _accept_task: tokio::task::JoinHandle<()>,
 }
 
@@ -265,7 +266,7 @@ impl FileTransferService {
         let (event_tx, event_rx) = mpsc::channel::<Event>(64);
 
         let accept_task = tokio::task::spawn_local(run_service(
-            endpoint,
+            endpoint.clone(),
             cmd_rx,
             event_tx,
             cert_chain,
@@ -277,6 +278,7 @@ impl FileTransferService {
         Ok(Self {
             cmd_tx,
             event_rx,
+            endpoint,
             _accept_task: accept_task,
         })
     }
@@ -297,6 +299,14 @@ impl FileTransferService {
 
     pub async fn next_event(&mut self) -> Option<Event> {
         self.event_rx.recv().await
+    }
+
+    /// The actual UDP address the QUIC endpoint bound to. Mainly useful in
+    /// tests (port 0) and for logging; production callers already know their
+    /// configured port.
+    #[allow(dead_code)]
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.endpoint.local_addr()
     }
 }
 
@@ -466,6 +476,8 @@ async fn send_transfer(
     }
 
     ctrl_send.finish().ok();
+    // Receiver closes the connection once it has processed every stream —
+    // we wait here to avoid tearing down mid-read.
     conn.closed().await;
     Ok(root.clone())
 }
@@ -883,7 +895,7 @@ async fn recv_transfer(
     }
 
     ctrl_send.finish().ok();
-    conn.closed().await;
+    conn.close(0u32.into(), b"done");
     Ok(Some(root_dst))
 }
 
@@ -1157,5 +1169,135 @@ mod tests {
         assert_eq!(sanitize_component("foo\0bar"), "foobar");
         assert_eq!(sanitize_component(""), "_");
         assert_eq!(sanitize_component(".."), "_");
+    }
+
+    /// End-to-end smoke test: two FileTransferService instances on loopback
+    /// round-trip a small file. Validates the QUIC handshake, fingerprint
+    /// verification, CBOR framing, chunk + EntryDone flow, and destination
+    /// rename — i.e. the critical path of task 8 before task 11 builds on it.
+    #[test]
+    fn loopback_roundtrip_small_file() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, RwLock};
+        use tokio::runtime::Builder;
+        use tokio::task::LocalSet;
+
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        let local = LocalSet::new();
+        runtime.block_on(local.run_until(async move {
+            // Unique scratch dir so parallel runs don't collide.
+            let scratch = std::env::temp_dir().join(format!(
+                "lan-mouse-ft-test-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            ));
+            std::fs::create_dir_all(&scratch).unwrap();
+
+            let cert_path = scratch.join("identity.pem");
+            let cert = crypto::generate_key_and_cert(&cert_path).unwrap();
+            let fp = crypto::certificate_fingerprint(&cert);
+
+            // Both sides use the same identity. A real deployment has
+            // distinct certs but the fingerprint-allowlist verifier doesn't
+            // care — it just checks the map.
+            let authorized = Arc::new(RwLock::new({
+                let mut m = HashMap::new();
+                m.insert(fp.clone(), "loopback".into());
+                m
+            }));
+
+            let limits = Limits {
+                max_bytes: 10 * 1024 * 1024,
+                max_entries: 100,
+            };
+
+            let mut receiver =
+                FileTransferService::start(0, false, &cert_path, authorized.clone(), limits)
+                    .await
+                    .expect("receiver start");
+            let mut sender =
+                FileTransferService::start(0, false, &cert_path, authorized.clone(), limits)
+                    .await
+                    .expect("sender start");
+            let recv_port = receiver.local_addr().unwrap().port();
+
+            let source_path = scratch.join("hello.txt");
+            let payload = b"hello from quic land\n".repeat(1000);
+            std::fs::write(&source_path, &payload).unwrap();
+
+            let dest_dir = scratch.join("inbox");
+            std::fs::create_dir_all(&dest_dir).unwrap();
+
+            // Initiate send.
+            sender
+                .send_command(Command::SendPath {
+                    target_addr: (std::net::Ipv4Addr::LOCALHOST, recv_port).into(),
+                    target_fingerprint: fp.clone(),
+                    root: source_path.clone(),
+                })
+                .await;
+
+            // Receiver observes the offer; respond with Accept.
+            let offer = tokio::time::timeout(Duration::from_secs(5), receiver.next_event())
+                .await
+                .expect("offer within 5s")
+                .expect("receiver got event");
+            let xfer_id = match offer {
+                Event::IncomingOffer { xfer_id, .. } => xfer_id,
+                other => panic!("unexpected first event: {other:?}"),
+            };
+
+            receiver
+                .send_command(Command::RespondOffer {
+                    xfer_id,
+                    decision: Decision::Accept {
+                        dest_dir: dest_dir.clone(),
+                    },
+                })
+                .await;
+
+            // Drain events until the receiver reports Finished.
+            let mut got_finished = false;
+            loop {
+                match tokio::time::timeout(Duration::from_secs(10), receiver.next_event()).await {
+                    Ok(Some(Event::Finished {
+                        xfer_id: fin_id,
+                        result: TransferResult::Ok { .. },
+                    })) => {
+                        assert_eq!(fin_id, xfer_id);
+                        got_finished = true;
+                        break;
+                    }
+                    Ok(Some(Event::Finished {
+                        result: TransferResult::Error(e),
+                        ..
+                    })) => panic!("receiver reported error: {e}"),
+                    Ok(Some(Event::Finished {
+                        result: TransferResult::Cancelled,
+                        ..
+                    })) => panic!("receiver reported cancel"),
+                    Ok(Some(Event::Progress { .. })) => {}
+                    Ok(Some(other)) => panic!("unexpected event: {other:?}"),
+                    Ok(None) => panic!("receiver channel closed early"),
+                    Err(_) => panic!("timeout waiting for Finished"),
+                }
+            }
+            assert!(got_finished);
+
+            let delivered = dest_dir.join("hello.txt").join("hello.txt");
+            // ^ root_name is "hello.txt" so dest is inbox/hello.txt/<entry>.
+            //   The entry's own rel_path is also "hello.txt" (the file name).
+            //   This matches enumerate_entries' single-file handling which
+            //   uses the root's file_name as the rel_path.
+            let got = std::fs::read(&delivered)
+                .unwrap_or_else(|e| panic!("expected delivered file at {delivered:?}: {e}"));
+            assert_eq!(got, payload, "payload mismatch");
+
+            // Best-effort cleanup.
+            let _ = std::fs::remove_dir_all(&scratch);
+        }));
     }
 }
