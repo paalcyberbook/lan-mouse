@@ -80,7 +80,10 @@ pub enum FileDropBackend {
     /// surfaces (needs verification per the plan's Risk #1).
     #[cfg(all(unix, feature = "layer_shell", not(target_os = "macos")))]
     LayerShellDataDevice,
-    // Windows OLE IDropTarget slots in here in task 12.
+    /// Windows: per-edge `IDropTarget` strip windows on a dedicated STA
+    /// thread. Coexists with the `WH_MOUSE_LL` pointer-capture thread.
+    #[cfg(windows)]
+    WindowsOle,
 }
 
 impl Display for FileDropBackend {
@@ -89,15 +92,22 @@ impl Display for FileDropBackend {
             FileDropBackend::Dummy => write!(f, "dummy"),
             #[cfg(all(unix, feature = "layer_shell", not(target_os = "macos")))]
             FileDropBackend::LayerShellDataDevice => write!(f, "layer-shell-data-device"),
+            #[cfg(windows)]
+            FileDropBackend::WindowsOle => write!(f, "windows-ole"),
         }
     }
 }
 
 /// Pick a sensible default backend for the current OS. On wlroots Wayland
 /// sessions we attempt the `zwlr_layer_shell_v1` + `wl_data_device` path;
-/// elsewhere (no WAYLAND_DISPLAY, non-layer-shell compositor, etc.) we
-/// fall back to [`FileDropBackend::Dummy`] which produces no events.
+/// on Windows we use the OLE IDropTarget path; elsewhere (no
+/// WAYLAND_DISPLAY, non-layer-shell compositor, etc.) we fall back to
+/// [`FileDropBackend::Dummy`] which produces no events.
 pub fn auto_detect_backend() -> FileDropBackend {
+    #[cfg(windows)]
+    {
+        return FileDropBackend::WindowsOle;
+    }
     #[cfg(all(unix, feature = "layer_shell", not(target_os = "macos")))]
     {
         if std::env::var_os("WAYLAND_DISPLAY").is_some() {
@@ -125,6 +135,16 @@ pub fn file_drop_source(backend: Option<FileDropBackend>) -> Box<dyn FileDropSou
                 src
             } else {
                 log::info!("file-drop backend: dummy (layer_shell_dnd startup failed)");
+                Box::new(DummyFileDropSource)
+            }
+        }
+        #[cfg(windows)]
+        FileDropBackend::WindowsOle => {
+            if let Some(src) = crate::windows::drop_target::try_start() {
+                log::info!("file-drop backend: windows IDropTarget");
+                src
+            } else {
+                log::info!("file-drop backend: dummy (windows drop-target startup failed)");
                 Box::new(DummyFileDropSource)
             }
         }

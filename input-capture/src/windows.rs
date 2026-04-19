@@ -12,6 +12,9 @@ use super::{Capture, CaptureError, CaptureEvent, Position};
 mod display_util;
 mod event_thread;
 
+#[cfg(feature = "file_drop")]
+pub(crate) mod drop_target;
+
 pub struct WindowsInputCapture {
     event_rx: Receiver<(Position, CaptureEvent)>,
     event_thread: EventThread,
