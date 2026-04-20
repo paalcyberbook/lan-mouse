@@ -360,6 +360,40 @@ fn hex_val(b: u8) -> Option<u8> {
     }
 }
 
+/// Pull a `text/uri-list` payload out of an offer synchronously: open a
+/// pipe, request `receive()` into its write end, flush the wayland
+/// connection so the compositor forwards the receive request to the
+/// source, then blocking-read the source's payload from the pipe. The
+/// pipe write-end is closed immediately on our side (only the source
+/// should write). uri-list blobs are tiny (hundreds of bytes), so the
+/// read doesn't stall the dispatch tick meaningfully.
+///
+/// Used during both `data_device::enter` (drag-continues flow — emit
+/// DragStarted as soon as the drag hits our strip) and
+/// `data_device::drop` (degenerate user-stops-on-strip fallback).
+fn read_uris_from_offer(offer: &WlDataOffer, conn: &Connection) -> Vec<PathBuf> {
+    let (reader, writer) = match pipe2_cloexec() {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("layer-shell DnD: pipe2 failed: {e}");
+            return Vec::new();
+        }
+    };
+    offer.receive(URI_LIST_MIME.into(), writer.as_fd());
+    drop(writer);
+    // Push the `receive()` request out on the wire NOW — without this
+    // flush the request sits in our send buffer until the next event-
+    // loop tick, while the `read()` below blocks waiting for source
+    // data that the compositor hasn't been asked for yet.
+    let _ = conn.flush();
+    let mut buf = Vec::new();
+    if let Err(e) = std::fs::File::from(reader).read_to_end(&mut buf) {
+        log::warn!("layer-shell DnD: reading uri-list payload: {e}");
+        return Vec::new();
+    }
+    parse_uri_list(&buf)
+}
+
 impl Stream for LayerShellDnd {
     type Item = FileDropEvent;
 
@@ -458,7 +492,7 @@ impl Dispatch<WlDataDevice, ()> for State {
         _: &WlDataDevice,
         event: wl_data_device::Event,
         _: &(),
-        _: &Connection,
+        _conn: &Connection,
         _: &QueueHandle<Self>,
     ) {
         use wl_data_device::Event as E;
@@ -481,14 +515,33 @@ impl Dispatch<WlDataDevice, ()> for State {
                     .get(&offer)
                     .cloned()
                     .unwrap_or_default();
+                log::info!("layer-shell DnD: enter at edge {edge} with mime types {types:?}");
                 if !types.iter().any(|t| t == URI_LIST_MIME) {
                     // Not a file drag; ignore.
                     return;
                 }
                 // Accept the mime type so the source knows we'll take it on drop.
                 offer.accept(0, Some(URI_LIST_MIME.into()));
+
+                // Drag-continues UX (plan §1): pull the URIs synchronously
+                // right here at Enter, so we can kick off the eager QUIC
+                // transfer without waiting for a drop at the edge strip.
+                let paths = read_uris_from_offer(&offer, _conn);
                 state.hover = Some(HoverState { offer, edge });
                 state.emit_queue.push_back(FileDropEvent::Entered(edge));
+                if paths.is_empty() {
+                    log::info!("enter at {edge}: receive() returned no URIs");
+                } else {
+                    log::info!(
+                        "enter at {edge}: extracted {} path(s): {:?}",
+                        paths.len(),
+                        paths
+                    );
+                    state.emit_queue.push_back(FileDropEvent::DragStarted {
+                        position: edge,
+                        paths,
+                    });
+                }
             }
             E::Leave => {
                 if let Some(h) = state.hover.take() {

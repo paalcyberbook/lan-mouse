@@ -992,6 +992,30 @@ impl Service {
                 log::debug!("drag cancelled at {p}");
                 return;
             }
+            FileDropEvent::DragStarted { position, paths } => {
+                // Drag-continues flow (plan §1): the backend pulled file
+                // URIs at data_device::enter / IDropTarget::DragEnter. For
+                // this spike pass we just log — the full pipeline (eager
+                // QUIC transfer + receiver-side pending-drop state + drop-
+                // confirmation dialog) lands with tasks 24/25/31. Falling
+                // through to the legacy SendPath dispatch so the spike
+                // still transfers the file end-to-end.
+                log::info!(
+                    "file drag started at edge {position}: {} path(s) {:?}",
+                    paths.len(),
+                    paths
+                );
+                (position, paths)
+            }
+            FileDropEvent::DragEndedEarly { position, paths } => {
+                // User released *on* the strip instead of crossing — same
+                // as above for the spike, fall through to legacy dispatch.
+                log::info!(
+                    "file drag ended early at edge {position}: {} path(s)",
+                    paths.len()
+                );
+                (position, paths)
+            }
             FileDropEvent::Dropped { position, paths } => (position, paths),
         };
         if paths.is_empty() {

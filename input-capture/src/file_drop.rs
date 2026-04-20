@@ -32,7 +32,26 @@ pub enum FileDropEvent {
     /// A drag entered the edge zone at this position. Advisory — backends
     /// may skip emitting this and still be correct.
     Entered(Position),
-    /// Files dropped at the edge zone. The actionable event.
+    /// A drag entered the edge zone AND the backend has already pulled the
+    /// file list out of the DnD offer. This fires in the "drag-continues"
+    /// flow (plan §1): the receiver can start transferring the files
+    /// eagerly while the user's cursor carries the drag across to the
+    /// remote screen. Sent by both Wayland (data_device::enter) and Windows
+    /// (IDropTarget::DragEnter) backends.
+    DragStarted {
+        position: Position,
+        paths: Vec<PathBuf>,
+    },
+    /// User released the button *on* the edge strip instead of crossing
+    /// over to the remote. Degenerate case — service pops the drop-confirm
+    /// dialog on the remote with a cursor-agnostic default (Desktop).
+    DragEndedEarly {
+        position: Position,
+        paths: Vec<PathBuf>,
+    },
+    /// Files dropped at the edge zone. Legacy "drop on strip" path — kept
+    /// for backward compat during the rework; will be removed once all
+    /// callers consume the DragStarted/DragEndedEarly events.
     Dropped {
         position: Position,
         paths: Vec<PathBuf>,
@@ -45,6 +64,12 @@ impl Display for FileDropEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             FileDropEvent::Entered(p) => write!(f, "drag entered {p}"),
+            FileDropEvent::DragStarted { position, paths } => {
+                write!(f, "drag started at {position} ({} paths)", paths.len())
+            }
+            FileDropEvent::DragEndedEarly { position, paths } => {
+                write!(f, "drag ended early at {position} ({} paths)", paths.len())
+            }
             FileDropEvent::Dropped { position, paths } => {
                 write!(f, "drop at {position} ({} paths)", paths.len())
             }
