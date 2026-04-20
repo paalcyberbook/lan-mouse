@@ -132,17 +132,21 @@ impl Display for FileDropBackend {
 /// WAYLAND_DISPLAY, non-layer-shell compositor, etc.) we fall back to
 /// [`FileDropBackend::Dummy`] which produces no events.
 pub fn auto_detect_backend() -> FileDropBackend {
+    // Per-OS gating as two non-overlapping cfg branches so neither side
+    // produces "unreachable expression" warnings (the Windows path used to
+    // `return` unconditionally, making the Unix-side fallback dead code).
     #[cfg(windows)]
     {
-        return FileDropBackend::WindowsOle;
+        FileDropBackend::WindowsOle
     }
-    #[cfg(all(unix, feature = "layer_shell", not(target_os = "macos")))]
+    #[cfg(not(windows))]
     {
+        #[cfg(all(unix, feature = "layer_shell", not(target_os = "macos")))]
         if std::env::var_os("WAYLAND_DISPLAY").is_some() {
             return FileDropBackend::LayerShellDataDevice;
         }
+        FileDropBackend::Dummy
     }
-    FileDropBackend::Dummy
 }
 
 /// Instantiate a [`FileDropSource`] for the chosen backend, or auto-detect

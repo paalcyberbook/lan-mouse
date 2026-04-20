@@ -38,7 +38,7 @@
             <child>
               <object class="AdwStatusPage">
                 <property name="title" translatable="yes">Lan Mouse+</property>
-                <property name="description" translatable="yes">Share your mouse, keyboard, and clipboard across multiple computers — plus drag &amp; drop files between them</property>
+                <property name="description" translatable="yes">Share your mouse, keyboard, clipboard, and dropped files across multiple computers</property>
                 <property name="icon-name">de.feschber.LanMouse</property>
                 <property name="child">
                   <object class="AdwClamp">

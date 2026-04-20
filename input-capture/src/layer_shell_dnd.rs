@@ -277,6 +277,20 @@ impl LayerShellDnd {
     }
 }
 
+/// Width (in pixels) of the drop-detector strip along the edge. A 1-pixel
+/// strip is invisible but Hyprland in practice doesn't route pointer /
+/// data_device events to a strip that narrow — the cursor never actually
+/// sits on it. 20 px is still barely noticeable in normal use but wide
+/// enough that a drag entering the edge hits it reliably.
+///
+/// Set the env var `LAN_MOUSE_DND_DEBUG=1` to tint the strip ~25 % alpha
+/// so you can *see* where it lives while debugging.
+const STRIP_WIDTH: i32 = 20;
+
+fn dnd_debug() -> bool {
+    std::env::var_os("LAN_MOUSE_DND_DEBUG").is_some()
+}
+
 fn create_edge_surface(
     compositor: &WlCompositor,
     layer_shell: &ZwlrLayerShellV1,
@@ -293,15 +307,35 @@ fn create_edge_surface(
         pos,
     );
     let (anchor, width, height) = match pos {
-        Position::Left => (Anchor::Left | Anchor::Top | Anchor::Bottom, 1, 0),
-        Position::Right => (Anchor::Right | Anchor::Top | Anchor::Bottom, 1, 0),
-        Position::Top => (Anchor::Top | Anchor::Left | Anchor::Right, 0, 1),
-        Position::Bottom => (Anchor::Bottom | Anchor::Left | Anchor::Right, 0, 1),
+        Position::Left => (
+            Anchor::Left | Anchor::Top | Anchor::Bottom,
+            STRIP_WIDTH as u32,
+            0,
+        ),
+        Position::Right => (
+            Anchor::Right | Anchor::Top | Anchor::Bottom,
+            STRIP_WIDTH as u32,
+            0,
+        ),
+        Position::Top => (
+            Anchor::Top | Anchor::Left | Anchor::Right,
+            0,
+            STRIP_WIDTH as u32,
+        ),
+        Position::Bottom => (
+            Anchor::Bottom | Anchor::Left | Anchor::Right,
+            0,
+            STRIP_WIDTH as u32,
+        ),
     };
     layer_surface.set_anchor(anchor);
     layer_surface.set_size(width, height);
     layer_surface.set_exclusive_zone(0);
     layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
+    log::info!(
+        "layer-shell DnD: creating edge surface at {pos}, requested size {width}x{height}, strip width {STRIP_WIDTH}px, debug tint = {}",
+        dnd_debug()
+    );
     surface.commit();
     Some(EdgeSurface {
         surface,
@@ -458,25 +492,45 @@ impl Dispatch<ZwlrLayerSurfaceV1, Position> for State {
         qh: &QueueHandle<Self>,
     ) {
         match event {
-            zwlr_layer_surface_v1::Event::Configure { serial, .. } => {
+            zwlr_layer_surface_v1::Event::Configure {
+                serial,
+                width,
+                height,
+            } => {
+                log::info!(
+                    "layer-shell DnD: Configure at {pos}: compositor-assigned size {width}x{height}, serial {serial}"
+                );
                 surface.ack_configure(serial);
-                // Attach a 1×1 transparent buffer so the compositor accepts
-                // our surface as valid for pointer/DnD events.
+                // Lazily build the placeholder buffer on the first Configure.
                 if state.buffer.is_none() {
-                    if let Some(buf) = state.make_placeholder_buffer(qh) {
-                        state.buffer = Some(buf);
+                    match state.make_placeholder_buffer(qh) {
+                        Some(buf) => {
+                            log::info!("layer-shell DnD: placeholder buffer created");
+                            state.buffer = Some(buf);
+                        }
+                        None => {
+                            log::warn!(
+                                "layer-shell DnD: make_placeholder_buffer FAILED — strip will not receive DnD events"
+                            );
+                        }
                     }
                 }
                 if let Some(edge) = state.surfaces.get_mut(pos) {
                     if let Some(buf) = &state.buffer {
                         edge.surface.attach(Some(buf), 0, 0);
-                        edge.surface.damage_buffer(0, 0, 1, 1);
+                        // Damage the full strip so the buffer renders across
+                        // the whole area, not just the 1×1 origin pixel.
+                        edge.surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
                         edge.surface.commit();
                         edge.configured = true;
+                        log::info!(
+                            "layer-shell DnD: committed buffer to {pos} surface — strip is live"
+                        );
                     }
                 }
             }
             zwlr_layer_surface_v1::Event::Closed => {
+                log::info!("layer-shell DnD: compositor closed strip at {pos}");
                 if let Some(edge) = state.surfaces.remove(pos) {
                     state.surface_to_edge.remove(&edge.surface);
                 }
@@ -499,6 +553,7 @@ impl Dispatch<WlDataDevice, ()> for State {
         match event {
             E::DataOffer { id } => {
                 // A new offer is incoming — start tracking its mime-type list.
+                log::info!("layer-shell DnD: DataOffer received (id={id:?})");
                 state.pending_offers.insert(id, Vec::new());
             }
             E::Enter { surface, id, .. } => {
@@ -596,6 +651,7 @@ impl Dispatch<WlDataOffer, ()> for State {
         _: &QueueHandle<Self>,
     ) {
         if let wl_data_offer::Event::Offer { mime_type } = event {
+            log::debug!("layer-shell DnD: offer advertised mime {mime_type}");
             state
                 .pending_offers
                 .entry(offer.clone())
@@ -606,18 +662,57 @@ impl Dispatch<WlDataOffer, ()> for State {
 }
 
 impl State {
-    /// Create a 1×1 fully-transparent ARGB8888 shm buffer that our layer
-    /// surfaces attach to — compositors expect a committed buffer before
-    /// routing input / DnD to a surface.
+    /// Create an ARGB8888 shm buffer that our layer surfaces attach to —
+    /// compositors expect a committed buffer before routing input / DnD to a
+    /// surface. Fully transparent in production; tinted semi-opaque blue
+    /// when `LAN_MOUSE_DND_DEBUG` is set so the user can visually confirm
+    /// where the strip lives.
+    ///
+    /// Buffer is sized to cover the full strip dimensions so the pixel-
+    /// tint is visible along the whole edge when debug mode is on. One
+    /// buffer serves all four edges — each surface scales it to its own
+    /// size via `damage_buffer(0, 0, i32::MAX, i32::MAX)`.
     fn make_placeholder_buffer(&mut self, qh: &QueueHandle<State>) -> Option<WlBuffer> {
-        use std::os::fd::AsFd;
-        let mut tmp = tempfile::tempfile().ok()?;
         use std::io::Write;
-        // ARGB8888: one pixel, 4 bytes, fully transparent.
-        tmp.write_all(&[0, 0, 0, 0]).ok()?;
+        use std::os::fd::AsFd;
+
+        // Generous: 4096 px along the long edge × strip width. The exact
+        // height/width doesn't matter because damage_buffer is i32::MAX in
+        // both dims — the compositor stretches a single buffer.
+        let w: usize = STRIP_WIDTH as usize;
+        let h: usize = 4096;
+        let stride = w * 4;
+        let size = stride * h;
+
+        let debug = dnd_debug();
+        // ARGB pre-multiplied. In debug mode: 25 % alpha blue so it's
+        // visible but unobtrusive. In production: fully transparent.
+        let pixel: [u8; 4] = if debug {
+            // 0x40 alpha, pre-multiplied blue ≈ 0x00 red, 0x20 green, 0x40 blue
+            [0x40, 0x20, 0x00, 0x40]
+        } else {
+            [0, 0, 0, 0]
+        };
+        let mut tmp = tempfile::tempfile().ok()?;
+        let mut row = Vec::with_capacity(stride);
+        for _ in 0..w {
+            row.extend_from_slice(&pixel);
+        }
+        for _ in 0..h {
+            tmp.write_all(&row).ok()?;
+        }
         tmp.flush().ok()?;
-        let pool = self.shm.create_pool(tmp.as_fd(), 4, qh, ());
-        let buf = pool.create_buffer(0, 1, 1, 4, Format::Argb8888, qh, ());
+
+        let pool = self.shm.create_pool(tmp.as_fd(), size as i32, qh, ());
+        let buf = pool.create_buffer(
+            0,
+            w as i32,
+            h as i32,
+            stride as i32,
+            Format::Argb8888,
+            qh,
+            (),
+        );
         self.shm_pool = Some(pool);
         Some(buf)
     }
