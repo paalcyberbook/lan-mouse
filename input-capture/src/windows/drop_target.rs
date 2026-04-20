@@ -46,10 +46,10 @@ use windows::Win32::System::Ole::{
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, MSG, MoveWindow,
-    PostQuitMessage, PostThreadMessageW, RegisterClassExW, SetLayeredWindowAttributes,
-    ShowWindow, TranslateMessage, WM_USER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE, LWA_ALPHA, SW_SHOW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, LWA_ALPHA, MSG,
+    MoveWindow, PostQuitMessage, PostThreadMessageW, RegisterClassExW, SW_SHOW,
+    SetLayeredWindowAttributes, ShowWindow, TranslateMessage, WM_USER, WNDCLASSEXW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 use windows::core::{PCWSTR, implement, w};
 
@@ -128,12 +128,7 @@ impl WindowsDropTarget {
 
     fn post_signal(&self, sig: ThreadSignal) {
         unsafe {
-            let _ = PostThreadMessageW(
-                self.thread_id,
-                WM_USER,
-                WPARAM(sig as usize),
-                LPARAM(0),
-            );
+            let _ = PostThreadMessageW(self.thread_id, WM_USER, WPARAM(sig as usize), LPARAM(0));
         }
     }
 }
@@ -162,7 +157,10 @@ impl FileDropSource for WindowsDropTarget {
             if *guard == edges {
                 return;
             }
-            log::info!("windows drop-target: active edges = {edges:?} (was {:?})", *guard);
+            log::info!(
+                "windows drop-target: active edges = {edges:?} (was {:?})",
+                *guard
+            );
             *guard = edges;
         }
         self.post_signal(ThreadSignal::ReconcileEdges);
@@ -294,12 +292,7 @@ fn register_window_class() -> Vec<u16> {
     CLASS_NAME.to_vec()
 }
 
-unsafe extern "system" fn wnd_proc(
-    hwnd: HWND,
-    msg: u32,
-    w: WPARAM,
-    l: LPARAM,
-) -> LRESULT {
+unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     unsafe { DefWindowProcW(hwnd, msg, w, l) }
 }
 
@@ -312,9 +305,7 @@ fn create_edge_window(
         // Virtual-screen bounds via GetSystemMetrics SM_*VIRTUALSCREEN would
         // be the cleaner choice. v1 uses simple primary-screen dimensions —
         // multi-monitor refinement is a follow-up.
-        use windows::Win32::UI::WindowsAndMessaging::{
-            GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
-        };
+        use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
         let screen_w = GetSystemMetrics(SM_CXSCREEN);
         let screen_h = GetSystemMetrics(SM_CYSCREEN);
         let strip = 2;
@@ -343,20 +334,22 @@ fn create_edge_window(
         // 1% alpha so the strip is still hit-testable for DnD but
         // visually imperceptible. A fully-transparent WS_EX_TRANSPARENT
         // window does NOT receive drag events.
-        SetLayeredWindowAttributes(
-            hwnd,
-            windows::Win32::Foundation::COLORREF(0),
-            2,
-            LWA_ALPHA,
-        )?;
+        SetLayeredWindowAttributes(hwnd, windows::Win32::Foundation::COLORREF(0), 2, LWA_ALPHA)?;
         // Ensure the compositor puts it on top.
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = MoveWindow(hwnd, x, y, w, h, true);
 
-        let target: IDropTarget = DropTargetImpl { edge: pos, events: event_tx }.into();
+        let target: IDropTarget = DropTargetImpl {
+            edge: pos,
+            events: event_tx,
+        }
+        .into();
         RegisterDragDrop(hwnd, &target)?;
 
-        Ok(EdgeWindow { hwnd, _target: target })
+        Ok(EdgeWindow {
+            hwnd,
+            _target: target,
+        })
     }
 }
 
@@ -376,13 +369,13 @@ impl IDropTarget_Impl for DropTargetImpl_Impl {
         _pt: &POINTL,
         effect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
-        let is_file = unsafe {
-            data.as_ref()
-                .map(|d| has_file_format(d))
-                .unwrap_or(false)
-        };
+        let is_file = unsafe { data.as_ref().map(|d| has_file_format(d)).unwrap_or(false) };
         unsafe {
-            *effect = if is_file { DROPEFFECT_COPY } else { DROPEFFECT_NONE };
+            *effect = if is_file {
+                DROPEFFECT_COPY
+            } else {
+                DROPEFFECT_NONE
+            };
         }
         if is_file {
             let _ = self.events.send(FileDropEvent::Entered(self.edge));
@@ -420,7 +413,11 @@ impl IDropTarget_Impl for DropTargetImpl_Impl {
                 .unwrap_or_default()
         };
         unsafe {
-            *effect = if paths.is_empty() { DROPEFFECT_NONE } else { DROPEFFECT_COPY };
+            *effect = if paths.is_empty() {
+                DROPEFFECT_NONE
+            } else {
+                DROPEFFECT_COPY
+            };
         }
         if !paths.is_empty() {
             let _ = self.events.send(FileDropEvent::Dropped {

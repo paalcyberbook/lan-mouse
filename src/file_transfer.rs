@@ -121,7 +121,11 @@ pub enum Command {
     },
     /// Response to an [`Event::IncomingOffer`].
     RespondOffer { xfer_id: u64, decision: Decision },
-    /// Cancel an in-progress transfer (either direction).
+    /// Cancel an in-progress transfer (either direction). Reserved — the
+    /// GTK progress panel will wire this up when we add a real progress
+    /// widget; kept in the API so wire-protocol versions don't need
+    /// churning later.
+    #[allow(dead_code)]
     Cancel { xfer_id: u64 },
 }
 
@@ -283,6 +287,9 @@ impl FileTransferService {
         })
     }
 
+    /// Async variant — used by the loopback test. Production callers
+    /// live in a sync select-loop and use [`Self::try_send_command`].
+    #[allow(dead_code)]
     pub async fn send_command(&self, cmd: Command) {
         let _ = self.cmd_tx.send(cmd).await;
     }
@@ -1218,7 +1225,7 @@ mod tests {
                 FileTransferService::start(0, false, &cert_path, authorized.clone(), limits)
                     .await
                     .expect("receiver start");
-            let mut sender =
+            let sender =
                 FileTransferService::start(0, false, &cert_path, authorized.clone(), limits)
                     .await
                     .expect("sender start");
@@ -1259,8 +1266,9 @@ mod tests {
                 })
                 .await;
 
-            // Drain events until the receiver reports Finished.
-            let mut got_finished = false;
+            // Drain events until the receiver reports Finished. Non-Finished
+            // variants either loop (Progress) or panic; falling off the loop
+            // via `break` is proof the transfer completed cleanly.
             loop {
                 match tokio::time::timeout(Duration::from_secs(10), receiver.next_event()).await {
                     Ok(Some(Event::Finished {
@@ -1268,7 +1276,6 @@ mod tests {
                         result: TransferResult::Ok { .. },
                     })) => {
                         assert_eq!(fin_id, xfer_id);
-                        got_finished = true;
                         break;
                     }
                     Ok(Some(Event::Finished {
@@ -1285,7 +1292,6 @@ mod tests {
                     Err(_) => panic!("timeout waiting for Finished"),
                 }
             }
-            assert!(got_finished);
 
             let delivered = dest_dir.join("hello.txt").join("hello.txt");
             // ^ root_name is "hello.txt" so dest is inbox/hello.txt/<entry>.

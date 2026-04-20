@@ -448,7 +448,7 @@ impl Window {
 
         let row = adw::ActionRow::builder()
             .title(hostname)
-            .subtitle(&format!("{} (suggested: {})", ip_str, position))
+            .subtitle(format!("{} (suggested: {})", ip_str, position))
             .build();
 
         let connect_btn = gtk::Button::builder()
