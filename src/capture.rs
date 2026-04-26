@@ -305,6 +305,14 @@ impl CaptureTask {
                         }
                         match event {
                             ProtoEvent::Ack(_) => {
+                                // First-Ack-wins guard: the peer sometimes
+                                // re-sends Ack on Enter retransmits during
+                                // the DTLS handshake window; without this
+                                // we'd log "acknowledged" twice and re-flush
+                                // the queued clipboard, doubling traffic.
+                                if matches!(self.state, State::Sending) {
+                                    continue;
+                                }
                                 log::info!("client {handle} acknowledged the connection!");
                                 self.state = State::Sending;
                                 #[cfg(feature = "clipboard")]

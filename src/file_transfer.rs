@@ -119,6 +119,17 @@ pub enum Command {
         target_fingerprint: String,
         root: PathBuf,
     },
+    /// In-memory clipboard hand-off — bytes are wrapped in the same
+    /// Offer/Entry/Chunk wire format as a file but the receiver
+    /// auto-accepts and pipes them straight into the local clipboard
+    /// instead of writing to disk. Used for clipboards that exceed the
+    /// inline-DTLS UDP-safe size cap so they don't blow up Windows'
+    /// default ~8 KB UDP recv buffer (WSAEMSGSIZE).
+    SendClipboard {
+        target_addr: SocketAddr,
+        target_fingerprint: String,
+        content: Vec<u8>,
+    },
     /// Response to an [`Event::IncomingOffer`].
     RespondOffer { xfer_id: u64, decision: Decision },
     /// Cancel an in-progress transfer (either direction). Reserved — the
@@ -152,6 +163,13 @@ pub enum Event {
         xfer_id: u64,
         result: TransferResult,
     },
+    /// Counterpart to [`Command::SendClipboard`] — the bytes have arrived
+    /// and the service should push them into the local clipboard. No GTK
+    /// prompt; this path is silent end-to-end.
+    ClipboardReceived {
+        peer_addr: SocketAddr,
+        content: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -183,6 +201,14 @@ enum FileCtrl {
         root: String,
         entries: u32,
         total_bytes: u64,
+        /// Marks the transfer as a silent in-memory clipboard hand-off
+        /// rather than a file. Receiver auto-accepts and pipes the bytes
+        /// into the local clipboard. Defaults to false so old peers that
+        /// never send the field round-trip correctly as ordinary file
+        /// offers; new peers omit it from the wire when false to keep
+        /// the common-case frame size unchanged.
+        #[serde(default, skip_serializing_if = "is_false")]
+        clipboard: bool,
     },
     Accept {
         xfer_id: u64,
@@ -199,6 +225,10 @@ enum FileCtrl {
         bytes: u64,
         entries_done: u32,
     },
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -370,6 +400,30 @@ async fn run_service(
                     });
                     cancellers.insert(xfer_id, handle);
                 }
+                Some(Command::SendClipboard { target_addr, target_fingerprint, content }) => {
+                    let xfer_id = next_id.fetch_add(1, Ordering::Relaxed);
+                    let event_tx = event_tx.clone();
+                    let cert_chain = cert_chain.clone();
+                    let key = key.clone_key();
+                    let endpoint = endpoint.clone();
+                    let handle = tokio::task::spawn_local(async move {
+                        let res = send_clipboard_transfer(
+                            endpoint, target_addr, target_fingerprint, cert_chain, key,
+                            xfer_id, content,
+                        ).await;
+                        if let Err(e) = res {
+                            // Fire a Finished/Error event so a future GTK
+                            // status indicator can surface the failure;
+                            // the service-side log is the primary signal
+                            // for now.
+                            let _ = event_tx.send(Event::Finished {
+                                xfer_id,
+                                result: TransferResult::Error(e.to_string()),
+                            }).await;
+                        }
+                    });
+                    cancellers.insert(xfer_id, handle);
+                }
                 Some(Command::RespondOffer { xfer_id, decision }) => {
                     if let Some(tx) = pending_offers.remove(&xfer_id) {
                         let _ = tx.send(decision).await;
@@ -395,20 +449,28 @@ async fn run_service(
                 let handle = tokio::task::spawn_local(async move {
                     let res = recv_transfer(incoming, xfer_id, limits, decision_rx, event_tx.clone()).await;
                     let finished = match res {
-                        Ok(Some(dest)) => Event::Finished {
+                        Ok(RecvOutcome::File(dest)) => Some(Event::Finished {
                             xfer_id,
                             result: TransferResult::Ok { destination: dest },
-                        },
-                        Ok(None) => Event::Finished {
+                        }),
+                        Ok(RecvOutcome::Cancelled) => Some(Event::Finished {
                             xfer_id,
                             result: TransferResult::Cancelled,
-                        },
-                        Err(e) => Event::Finished {
+                        }),
+                        // Clipboard transfers emit their own ClipboardReceived
+                        // event from inside recv_transfer; suppress the
+                        // file-style Finished banner so the GTK UI doesn't
+                        // surface a phantom "transfer complete" for what the
+                        // user perceives as just clipboard sync.
+                        Ok(RecvOutcome::Clipboard) => None,
+                        Err(e) => Some(Event::Finished {
                             xfer_id,
                             result: TransferResult::Error(e.to_string()),
-                        },
+                        }),
                     };
-                    let _ = event_tx.send(finished).await;
+                    if let Some(ev) = finished {
+                        let _ = event_tx.send(ev).await;
+                    }
                 });
                 cancellers.insert(xfer_id, handle);
             }
@@ -460,6 +522,7 @@ async fn send_transfer(
             root: root_name.clone(),
             entries: entries.len() as u32,
             total_bytes,
+            clipboard: false,
         },
     )
     .await?;
@@ -487,6 +550,81 @@ async fn send_transfer(
     // we wait here to avoid tearing down mid-read.
     conn.closed().await;
     Ok(root.clone())
+}
+
+/// Lightweight sibling of [`send_transfer`] for in-memory clipboard payloads.
+/// Same wire format (Offer/Accept + one uni stream with Entry/Chunk/EntryDone)
+/// but the Offer carries `clipboard: true`, so the receiver auto-accepts
+/// without prompting and pipes the bytes into its local clipboard rather than
+/// writing a file. No filesystem activity on either side.
+async fn send_clipboard_transfer(
+    endpoint: Endpoint,
+    target_addr: SocketAddr,
+    target_fingerprint: String,
+    cert_chain: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+    xfer_id: u64,
+    content: Vec<u8>,
+) -> Result<(), FileTransferError> {
+    let total_bytes = content.len() as u64;
+    let client_cfg = build_client_config(cert_chain, key, target_fingerprint)?;
+    let connecting = endpoint.connect_with(client_cfg, target_addr, "lan-mouse")?;
+    let conn = connecting.await?;
+    log::debug!("clipboard xfer {xfer_id}: connected to {target_addr} ({total_bytes} bytes)");
+
+    let (mut ctrl_send, mut ctrl_recv) = conn.open_bi().await?;
+    write_frame(
+        &mut ctrl_send,
+        &FileCtrl::Offer {
+            xfer_id,
+            root: "clipboard".into(),
+            entries: 1,
+            total_bytes,
+            clipboard: true,
+        },
+    )
+    .await?;
+
+    match read_frame::<FileCtrl>(&mut ctrl_recv).await? {
+        FileCtrl::Accept { .. } => {}
+        FileCtrl::Decline { reason, .. } => {
+            return Err(FileTransferError::Protocol(format!(
+                "clipboard declined: {reason}"
+            )));
+        }
+        other => {
+            return Err(FileTransferError::Protocol(format!(
+                "unexpected pre-accept frame: {other:?}"
+            )));
+        }
+    }
+
+    let mut data_send = conn.open_uni().await?;
+    let hash: [u8; 32] = blake3::hash(&content).into();
+    write_frame(
+        &mut data_send,
+        &FileFrame::Entry {
+            rel_path: "clipboard".into(),
+            size: total_bytes,
+            mode: 0,
+            kind: EntryKind::File,
+            // Skip zstd: clipboard payloads are typically small text where
+            // the framing overhead would dominate any compression win, and
+            // skipping keeps this path branch-free with the existing chunker.
+            compressed: false,
+        },
+    )
+    .await?;
+    // One Chunk fits the worst case: clipboard is bounded above by
+    // MAX_CLIPBOARD_SIZE (64 KB) which is half of MAX_FRAME_BYTES (128 KB).
+    if !content.is_empty() {
+        write_frame(&mut data_send, &FileFrame::Chunk { data: content }).await?;
+    }
+    write_frame(&mut data_send, &FileFrame::EntryDone { blake3: hash }).await?;
+    data_send.finish().ok();
+    ctrl_send.finish().ok();
+    conn.closed().await;
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -669,33 +807,44 @@ fn is_already_compressed(head: &[u8]) -> bool {
 
 // ----- Receiver ----------------------------------------------------------
 
+/// What `recv_transfer` resolved to. Lets the outer service loop decide
+/// whether to emit a final `Event::Finished` (skipped for clipboard
+/// transfers since they emit their own [`Event::ClipboardReceived`] and
+/// should not surface a redundant transfer-completed banner in the UI).
+enum RecvOutcome {
+    File(PathBuf),
+    Cancelled,
+    Clipboard,
+}
+
 async fn recv_transfer(
     incoming: quinn::Incoming,
     xfer_id: u64,
     limits: Limits,
     mut decision_rx: mpsc::Receiver<Decision>,
     event_tx: mpsc::Sender<Event>,
-) -> Result<Option<PathBuf>, FileTransferError> {
+) -> Result<RecvOutcome, FileTransferError> {
     let conn = incoming.await?;
     let peer_addr = conn.remote_address();
     let peer_fp = peer_fingerprint(&conn);
     log::debug!("xfer {xfer_id}: accepted from {peer_addr} fp={peer_fp}");
 
     let (mut ctrl_send, mut ctrl_recv) = conn.accept_bi().await?;
-    let offer = match read_frame::<FileCtrl>(&mut ctrl_recv).await? {
-        FileCtrl::Offer {
-            xfer_id: _,
-            root,
-            entries,
-            total_bytes,
-        } => (root, entries, total_bytes),
-        other => {
-            return Err(FileTransferError::Protocol(format!(
-                "first ctrl frame was not Offer: {other:?}"
-            )));
-        }
-    };
-    let (root_name, entries_total, total_bytes) = offer;
+    let (root_name, entries_total, total_bytes, is_clipboard) =
+        match read_frame::<FileCtrl>(&mut ctrl_recv).await? {
+            FileCtrl::Offer {
+                xfer_id: _,
+                root,
+                entries,
+                total_bytes,
+                clipboard,
+            } => (root, entries, total_bytes, clipboard),
+            other => {
+                return Err(FileTransferError::Protocol(format!(
+                    "first ctrl frame was not Offer: {other:?}"
+                )));
+            }
+        };
 
     if total_bytes > limits.max_bytes || entries_total > limits.max_entries {
         write_frame(
@@ -707,7 +856,70 @@ async fn recv_transfer(
         )
         .await?;
         ctrl_send.finish().ok();
-        return Ok(None);
+        return Ok(RecvOutcome::Cancelled);
+    }
+
+    if is_clipboard {
+        // Auto-accept silent clipboard transfer. No GTK prompt, no disk I/O.
+        // We still go through the same Entry/Chunk/EntryDone framing so the
+        // sender can reuse the chunker and so a future "large clipboard"
+        // case (multi-chunk) just works.
+        write_frame(&mut ctrl_send, &FileCtrl::Accept { xfer_id }).await?;
+        let mut data_recv = conn.accept_uni().await?;
+        let (compressed, expected_size) = match read_frame::<FileFrame>(&mut data_recv).await? {
+            FileFrame::Entry {
+                kind: EntryKind::File,
+                size,
+                compressed,
+                ..
+            } => (compressed, size),
+            other => {
+                return Err(FileTransferError::Protocol(format!(
+                    "clipboard: first data frame was not File Entry: {other:?}"
+                )));
+            }
+        };
+        let mut buf: Vec<u8> = Vec::with_capacity(expected_size as usize);
+        let mut hasher = blake3::Hasher::new();
+        let expected_hash;
+        loop {
+            match read_frame::<FileFrame>(&mut data_recv).await? {
+                FileFrame::Chunk { data } => {
+                    let raw = maybe_decompress(data, compressed)?;
+                    hasher.update(&raw);
+                    buf.extend_from_slice(&raw);
+                }
+                FileFrame::EntryDone { blake3 } => {
+                    expected_hash = blake3;
+                    break;
+                }
+                other => {
+                    return Err(FileTransferError::Protocol(format!(
+                        "clipboard: expected Chunk/EntryDone, got: {other:?}"
+                    )));
+                }
+            }
+        }
+        let actual: [u8; 32] = *hasher.finalize().as_bytes();
+        if actual != expected_hash {
+            return Err(FileTransferError::Protocol(
+                "clipboard: blake3 mismatch".into(),
+            ));
+        }
+        ctrl_send.finish().ok();
+        conn.close(0u32.into(), b"done");
+        log::debug!(
+            "clipboard xfer {xfer_id}: received {} bytes from {peer_addr}",
+            buf.len()
+        );
+        event_tx
+            .send(Event::ClipboardReceived {
+                peer_addr,
+                content: buf,
+            })
+            .await
+            .ok();
+        return Ok(RecvOutcome::Clipboard);
     }
 
     event_tx
@@ -738,7 +950,7 @@ async fn recv_transfer(
             )
             .await?;
             ctrl_send.finish().ok();
-            return Ok(None);
+            return Ok(RecvOutcome::Cancelled);
         }
     };
 
@@ -903,7 +1115,7 @@ async fn recv_transfer(
 
     ctrl_send.finish().ok();
     conn.close(0u32.into(), b"done");
-    Ok(Some(root_dst))
+    Ok(RecvOutcome::File(root_dst))
 }
 
 fn peer_fingerprint(conn: &quinn::Connection) -> String {
@@ -1410,6 +1622,86 @@ mod tests {
                 "decline should leave destination empty, got {} entries",
                 entries.len()
             );
+
+            let _ = std::fs::remove_dir_all(&scratch);
+        }));
+    }
+
+    /// Silent clipboard hand-off: sender ships an in-memory payload with
+    /// `SendClipboard`, receiver auto-accepts (no GTK prompt expected) and
+    /// emits a `ClipboardReceived` event with the original bytes intact.
+    /// Regression-guards both the new wire field on `FileCtrl::Offer` and
+    /// the in-memory accumulator path inside `recv_transfer`.
+    #[test]
+    fn loopback_silent_clipboard_roundtrip() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, RwLock};
+        use tokio::runtime::Builder;
+        use tokio::task::LocalSet;
+
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        let local = LocalSet::new();
+        runtime.block_on(local.run_until(async move {
+            let scratch = std::env::temp_dir().join(format!(
+                "lan-mouse-ft-clip-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            ));
+            std::fs::create_dir_all(&scratch).unwrap();
+
+            let cert_path = scratch.join("identity.pem");
+            let cert = crypto::generate_key_and_cert(&cert_path).unwrap();
+            let fp = crypto::certificate_fingerprint(&cert);
+
+            let authorized = Arc::new(RwLock::new({
+                let mut m = HashMap::new();
+                m.insert(fp.clone(), "loopback".into());
+                m
+            }));
+            let limits = Limits {
+                max_bytes: 1024 * 1024,
+                max_entries: 100,
+            };
+
+            let mut receiver =
+                FileTransferService::start(0, false, &cert_path, authorized.clone(), limits)
+                    .await
+                    .expect("receiver start");
+            let sender =
+                FileTransferService::start(0, false, &cert_path, authorized.clone(), limits)
+                    .await
+                    .expect("sender start");
+            let recv_port = receiver.local_addr().unwrap().port();
+
+            // ~9 KB payload — well past the 1 KB inline DTLS cap and past
+            // the Windows default UDP recv buffer that triggered the
+            // original WSAEMSGSIZE wedge.
+            let payload: Vec<u8> = (0..9000).map(|i| (i % 251) as u8).collect();
+
+            sender
+                .send_command(Command::SendClipboard {
+                    target_addr: (std::net::Ipv4Addr::LOCALHOST, recv_port).into(),
+                    target_fingerprint: fp.clone(),
+                    content: payload.clone(),
+                })
+                .await;
+
+            let event = tokio::time::timeout(Duration::from_secs(10), receiver.next_event())
+                .await
+                .expect("clipboard event within 10s")
+                .expect("receiver got event");
+            match event {
+                Event::ClipboardReceived { content, .. } => {
+                    assert_eq!(content, payload, "clipboard payload mismatch");
+                }
+                Event::IncomingOffer { .. } => {
+                    panic!("silent clipboard must not surface a user-prompt IncomingOffer")
+                }
+                other => panic!("unexpected event: {other:?}"),
+            }
 
             let _ = std::fs::remove_dir_all(&scratch);
         }));

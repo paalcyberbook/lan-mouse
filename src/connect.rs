@@ -334,7 +334,21 @@ async fn receive_loop(
     ping_response: Rc<RefCell<HashSet<SocketAddr>>>,
 ) {
     let mut buf = [0u8; RECV_BUF_SIZE];
-    while let Ok(n) = conn.recv(&mut buf).await {
+    loop {
+        let n = match conn.recv(&mut buf).await {
+            Ok(n) => n,
+            Err(e) => {
+                // Surface the actual webrtc-util/webrtc-dtls error instead of
+                // a bare "recv error". DTLSConn collapses every fatal cause —
+                // peer closed, decrypt failure, underlying socket dead — into
+                // an opaque `util::Error`, so the string is the only diagnosis
+                // signal we get. Treating this as fatal here mirrors what the
+                // old `while let Ok(n)` did; the outer reconnect loop handles
+                // recovery.
+                log::warn!("recv error from {addr}: {e}");
+                break;
+            }
+        };
         // Check for clipboard message (sentinel byte 0xFF)
         #[cfg(feature = "clipboard")]
         if n >= 5 && buf[0] == crate::clipboard::CLIPBOARD_MSG_TYPE {
@@ -360,7 +374,6 @@ async fn receive_loop(
             }
         }
     }
-    log::warn!("recv error");
     disconnect(&client_manager, handle, addr, &conns).await;
 }
 

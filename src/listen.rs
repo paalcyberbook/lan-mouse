@@ -282,7 +282,20 @@ async fn read_loop(
 ) -> Result<(), Error> {
     let mut b = [0u8; RECV_BUF_SIZE];
 
-    while let Ok(n) = conn.recv(&mut b).await {
+    loop {
+        let n = match conn.recv(&mut b).await {
+            Ok(n) => n,
+            Err(e) => {
+                // Same reasoning as in `connect.rs::receive_loop`: surface
+                // the actual error so we can tell a clean peer close from a
+                // socket-level failure (e.g. webrtc-util's listener wedging
+                // after WSAEMSGSIZE on Windows). All recv errors stay fatal
+                // here; recovery is the peer's responsibility on the next
+                // reconnect.
+                log::info!("dtls client {addr} recv error: {e}");
+                break;
+            }
+        };
         // Check for clipboard message
         #[cfg(feature = "clipboard")]
         if n >= 5 && b[0] == crate::clipboard::CLIPBOARD_MSG_TYPE {

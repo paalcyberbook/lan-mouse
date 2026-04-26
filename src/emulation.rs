@@ -141,6 +141,12 @@ impl ListenTask {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         let mut last_response = HashMap::new();
         let mut rejected_connections = HashMap::new();
+        // First-Enter-wins per addr: the sender retransmits Enter while
+        // waiting for the Ack handshake, so without this we'd fire
+        // ReleaseNotify + Entered twice and log "entered this device" twice.
+        // Cleared on Leave so a re-entry from the same peer fires again.
+        let mut entered: std::collections::HashSet<std::net::SocketAddr> =
+            std::collections::HashSet::new();
         loop {
             select! {
                 e = self.listener.next() => {match e {
@@ -150,13 +156,20 @@ impl ListenTask {
                         match event {
                             ProtoEvent::Enter(pos) => {
                                 if let Some(fingerprint) = self.listener.get_certificate_fingerprint(addr).await {
-                                    log::info!("releasing capture: {addr} entered this device");
-                                    self.event_tx.send(EmulationEvent::ReleaseNotify).expect("channel closed");
+                                    // Always Ack so the sender knows we got
+                                    // it (otherwise it keeps retransmitting),
+                                    // but only emit ReleaseNotify/Entered the
+                                    // first time per session.
                                     self.listener.reply(addr, ProtoEvent::Ack(0)).await;
-                                    self.event_tx.send(EmulationEvent::Entered{addr, pos: to_ipc_pos(pos), fingerprint}).expect("channel closed");
+                                    if entered.insert(addr) {
+                                        log::info!("releasing capture: {addr} entered this device");
+                                        self.event_tx.send(EmulationEvent::ReleaseNotify).expect("channel closed");
+                                        self.event_tx.send(EmulationEvent::Entered{addr, pos: to_ipc_pos(pos), fingerprint}).expect("channel closed");
+                                    }
                                 }
                             }
                             ProtoEvent::Leave(_) => {
+                                entered.remove(&addr);
                                 self.emulation_proxy.remove(addr);
                                 self.listener.reply(addr, ProtoEvent::Ack(0)).await;
                             }

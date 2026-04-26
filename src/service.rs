@@ -240,7 +240,7 @@ impl Service {
         let emulation = Emulation::new(emulation_backend, listener);
 
         // create dns resolver
-        let resolver = DnsResolver::new()?;
+        let resolver = DnsResolver::new(ipv6_enabled)?;
 
         let port = config.port();
 
@@ -718,17 +718,24 @@ impl Service {
             ICaptureEvent::ClientEntered(handle) => {
                 log::info!("entering client {handle} ...");
                 self.spawn_hook_command(handle);
-                // Sync clipboard to the client we're entering
+                // Sync clipboard to the client we're entering. Same
+                // size-aware split as `broadcast_clipboard_text`: small
+                // payloads ride DTLS for snappy first-paste; mid-size
+                // payloads go via the QUIC side channel so we don't blow
+                // up the Windows UDP recv buffer.
                 #[cfg(feature = "clipboard")]
                 if let Some(ref monitor) = self.clipboard_monitor {
                     let clip = monitor.get_current_text();
-                    if !clip.is_empty() {
-                        log::info!(
-                            "syncing clipboard to client on enter ({} bytes)",
-                            clip.len()
-                        );
+                    let bytes = clip.len();
+                    if bytes == 0 {
+                        // nothing to sync
+                    } else if bytes <= crate::clipboard::MAX_INLINE_CLIPBOARD_SIZE {
+                        log::info!("syncing clipboard to client on enter inline ({bytes} bytes)");
                         let data = crate::clipboard::encode_clipboard_msg(&clip);
                         self.capture.send_clipboard(&data);
+                    } else {
+                        log::info!("syncing clipboard to client on enter via QUIC ({bytes} bytes)");
+                        self.send_clipboard_silent(clip.into_bytes());
                     }
                 }
             }
@@ -917,6 +924,27 @@ impl Service {
                     result: ipc,
                 });
             }
+            #[cfg(feature = "clipboard")]
+            file_transfer::Event::ClipboardReceived { peer_addr, content } => {
+                let bytes = content.len();
+                let text = match String::from_utf8(content) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        log::warn!(
+                            "silent clipboard from {peer_addr}: payload not valid UTF-8 ({bytes} bytes), dropping"
+                        );
+                        return;
+                    }
+                };
+                log::info!(
+                    "silent clipboard from {peer_addr}: {bytes} bytes (via QUIC side channel)"
+                );
+                if let Some(ref clipboard) = self.clipboard_monitor {
+                    clipboard.set_text(&text);
+                }
+            }
+            #[cfg(not(feature = "clipboard"))]
+            file_transfer::Event::ClipboardReceived { .. } => {}
         }
     }
 
@@ -1247,13 +1275,9 @@ impl Service {
     fn handle_clipboard_changed(&mut self, change: ClipboardChange) {
         match change {
             ClipboardChange::Text(text) => {
-                log::info!("clipboard changed, broadcasting ({} bytes)", text.len());
                 #[cfg(feature = "clipboard")]
-                {
-                    let data = crate::clipboard::encode_clipboard_msg(&text);
-                    self.emulation.send_clipboard(&data);
-                    self.capture.send_clipboard(&data);
-                }
+                self.broadcast_clipboard_text(text);
+                #[cfg(not(feature = "clipboard"))]
                 let _ = text;
             }
             ClipboardChange::OversizeText { content } => {
@@ -1263,6 +1287,56 @@ impl Service {
                 self.handle_clipboard_image(png, width, height);
             }
         }
+    }
+
+    /// Pick the right transport for a clipboard text payload:
+    ///   * `≤ MAX_INLINE_CLIPBOARD_SIZE` → inline DTLS UDP (fast path).
+    ///   * `> MAX_INLINE_CLIPBOARD_SIZE` → silent QUIC side channel
+    ///     ([`Self::send_clipboard_silent`]). Avoids hitting Windows'
+    ///     ~8 KB UDP recv buffer (`WSAEMSGSIZE`) which wedges the DTLS
+    ///     listener until reboot.
+    #[cfg(feature = "clipboard")]
+    fn broadcast_clipboard_text(&self, text: String) {
+        let bytes = text.len();
+        if bytes <= crate::clipboard::MAX_INLINE_CLIPBOARD_SIZE {
+            log::info!("clipboard changed, broadcasting inline ({bytes} bytes)");
+            let data = crate::clipboard::encode_clipboard_msg(&text);
+            self.emulation.send_clipboard(&data);
+            self.capture.send_clipboard(&data);
+        } else {
+            log::info!("clipboard changed, broadcasting via QUIC ({bytes} bytes)");
+            self.send_clipboard_silent(text.into_bytes());
+        }
+    }
+
+    /// Hand a medium-sized clipboard payload (1 KB – 64 KB) to the QUIC
+    /// file-transfer service for in-memory delivery to the active client.
+    /// No prompt, no temp file, no disk activity on either side.
+    #[cfg(all(feature = "clipboard", feature = "file_drop"))]
+    fn send_clipboard_silent(&self, content: Vec<u8>) {
+        let Some(ft) = &self.file_transfer else {
+            log::warn!("silent clipboard dropped: file-transfer service unavailable");
+            return;
+        };
+        let Some((target_addr, fingerprint)) = self.active_transfer_target() else {
+            log::warn!("silent clipboard dropped: no active client with a known fingerprint");
+            return;
+        };
+        ft.try_send_command(file_transfer::Command::SendClipboard {
+            target_addr,
+            target_fingerprint: fingerprint,
+            content,
+        });
+    }
+
+    /// Fallback when the `file_drop` (and thus QUIC file-transfer) feature
+    /// is disabled at compile time. Mid-size clipboards are silently
+    /// dropped — the inline path can't carry them safely on Windows.
+    #[cfg(all(feature = "clipboard", not(feature = "file_drop")))]
+    fn send_clipboard_silent(&self, _content: Vec<u8>) {
+        log::warn!(
+            "silent clipboard requires the file_drop feature; mid-size clipboards are dropped"
+        );
     }
 
     /// Stash the oversize text and prompt the sender-side frontend.

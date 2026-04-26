@@ -3,7 +3,7 @@ use std::{collections::HashMap, net::IpAddr};
 use local_channel::mpsc::{Receiver, Sender, channel};
 use tokio::task::{JoinHandle, spawn_local};
 
-use hickory_resolver::{ResolveError, TokioResolver};
+use hickory_resolver::{ResolveError, TokioResolver, config::LookupIpStrategy};
 use tokio_util::sync::CancellationToken;
 
 use lan_mouse_ipc::ClientHandle;
@@ -34,8 +34,17 @@ struct DnsTask {
 }
 
 impl DnsResolver {
-    pub(crate) fn new() -> Result<Self, ResolveError> {
-        let resolver = TokioResolver::builder_tokio()?.build();
+    pub(crate) fn new(ipv6_enabled: bool) -> Result<Self, ResolveError> {
+        let mut builder = TokioResolver::builder_tokio()?;
+        if !ipv6_enabled {
+            // Skip AAAA queries entirely when IPv6 is disabled in the
+            // service config — otherwise hickory issues both A and AAAA in
+            // parallel and every "no AAAA records" failure surfaces as a
+            // user-visible "could not resolve <host>" warn line, even
+            // though the A query succeeded and the connection works fine.
+            builder.options_mut().ip_strategy = LookupIpStrategy::Ipv4Only;
+        }
+        let resolver = builder.build();
         let (request_tx, request_rx) = channel();
         let (event_tx, event_rx) = channel();
         let cancellation_token = CancellationToken::new();

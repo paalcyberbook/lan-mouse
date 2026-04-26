@@ -5,9 +5,27 @@ use local_channel::mpsc::{Receiver, Sender, channel};
 use sha2::{Digest, Sha256};
 use tokio::task::{JoinHandle, spawn_local};
 
-/// Maximum clipboard text size (64 KB). Text above this goes through the
-/// file-transfer side channel instead (see [`ClipboardChange::OversizeText`]).
+/// Threshold above which copying prompts the user before sending via the
+/// file-transfer side channel (see [`ClipboardChange::OversizeText`]).
+/// Text within `(MAX_INLINE_CLIPBOARD_SIZE, MAX_CLIPBOARD_SIZE]` is sent
+/// silently over the same QUIC channel.
 pub const MAX_CLIPBOARD_SIZE: usize = 65536;
+
+/// Maximum clipboard size that we ship inline as a single DTLS UDP datagram.
+/// Anything larger is routed through the QUIC file-transfer channel instead.
+///
+/// Why so small: a single UDP datagram on Windows is bounded above by the
+/// default `SO_RCVBUF` (~8 KB) of `webrtc-util`'s UDP listener. Sending a
+/// larger datagram triggers `WSAEMSGSIZE` (Windows os error 10040), which
+/// breaks `webrtc-util`'s `read_loop` (it `break`s on any recv error and
+/// never recovers). Once that fires the Windows DTLS listener is wedged
+/// until the host reboots, since the OS-level firewall connection-tracking
+/// entry stays poisoned across process restarts.
+///
+/// 1024 leaves comfortable headroom under typical Ethernet MTU (1500) once
+/// IP/UDP/DTLS overhead is subtracted, and keeps small sync events (text
+/// snippets, URLs, copied paths) on the low-latency DTLS path.
+pub const MAX_INLINE_CLIPBOARD_SIZE: usize = 1024;
 
 /// Sentinel byte to identify clipboard messages in the wire protocol.
 pub const CLIPBOARD_MSG_TYPE: u8 = 0xFF;
