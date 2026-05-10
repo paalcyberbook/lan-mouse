@@ -142,6 +142,16 @@ pub enum Command {
     Cli(CliArgs),
     /// run in daemon mode
     Daemon,
+    /// (Windows only) SCM dispatch entry. Invoked by the Service Control
+    /// Manager when the LanMousePlus service starts; not for direct use.
+    /// Use `lan-mouse cli service install` to register the service.
+    #[cfg(windows)]
+    Service,
+    /// (Windows only, internal) Worker spawned by the service supervisor
+    /// into the active user session at SYSTEM integrity. Runs the daemon
+    /// code with full desktop access. Not for direct use.
+    #[cfg(windows)]
+    ServiceWorker,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]

@@ -18,3 +18,16 @@ tokio = { version = "1.32.0", features = [
     "net",
     "rt",
 ] }
+
+# Windows-only deps:
+#   - windows-sys: MessageBox for the Explorer "Send via Lan Mouse+" verb
+#     so the user gets visible feedback (CLI stdout/stderr is invisible
+#     when invoked from a shell verb).
+#   - lan-mouse-service: install/uninstall/start/stop/status helpers for
+#     the `lan-mouse cli service ...` subcommands.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
+lan-mouse-service = { path = "../lan-mouse-service", version = "0.1.0" }

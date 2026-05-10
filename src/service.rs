@@ -27,7 +27,15 @@ use std::{
     io,
     net::{IpAddr, SocketAddr},
     sync::{Arc, RwLock},
+    time::Duration,
 };
+
+/// How long a stashed clipboard payload remains eligible to be offered
+/// to a remote client when the cursor next crosses. Older stashes are
+/// silently discarded so the user isn't surprised by a transfer offer
+/// for something they copied much earlier.
+#[cfg(feature = "clipboard")]
+const PENDING_CLIPBOARD_TTL: Duration = Duration::from_secs(5 * 60);
 use thiserror::Error;
 use tokio::{process::Command, signal, sync::Notify};
 
@@ -85,14 +93,16 @@ pub struct Service {
     clipboard_monitor: Option<crate::clipboard::ClipboardMonitor>,
     /// clipboard change receiver
     clipboard_rx: local_channel::mpsc::Receiver<ClipboardChange>,
-    /// Oversize clipboard text awaiting the user's Send/Truncate/Ignore
-    /// decision. Latest change wins if the user takes long enough for the
-    /// clipboard to change again.
+    /// Oversize clipboard text stashed silently on copy. Dispatched as a
+    /// file offer to the next client the cursor crosses into (within
+    /// `PENDING_CLIPBOARD_TTL`). The receiver then gets the standard
+    /// FileOfferIncoming dialog. Latest copy supersedes; expired stashes
+    /// are dropped silently.
     #[cfg(feature = "clipboard")]
-    pending_clipboard_overflow: Option<String>,
-    /// PNG-encoded clipboard image awaiting the user's Send/Skip decision.
+    pending_clipboard_overflow: Option<(std::time::Instant, String)>,
+    /// PNG-encoded clipboard image, stashed under the same rules.
     #[cfg(feature = "clipboard")]
-    pending_clipboard_image: Option<Vec<u8>>,
+    pending_clipboard_image: Option<(std::time::Instant, Vec<u8>)>,
     /// mDNS discovery event receiver
     discovery_rx: local_channel::mpsc::Receiver<FrontendEvent>,
     /// mDNS discovery service
@@ -115,6 +125,23 @@ pub struct Service {
     /// releases a file at a screen edge bordering a connected client.
     #[cfg(feature = "file_drop")]
     file_drop_source: Option<Box<dyn FileDropSource>>,
+    /// Tracks the in-flight drag-continues transfer so a subsequent
+    /// `Dropped` (user released on the strip) or `DragEndedEarly` event for
+    /// the same drag doesn't double-dispatch a second `SendPath`. Cleared
+    /// on any of those terminal events. See `handle_file_drop_event`.
+    #[cfg(feature = "file_drop")]
+    pending_drag: Option<PendingDrag>,
+}
+
+/// In-flight eager drag transfer recorded when a `FileDropEvent::DragStarted`
+/// is dispatched. Used to suppress the duplicate `SendPath` that otherwise
+/// fires when the same drag also produces a `Dropped` (user released on the
+/// edge strip) event.
+#[cfg(feature = "file_drop")]
+#[derive(Debug)]
+struct PendingDrag {
+    position: input_capture::Position,
+    paths: Vec<std::path::PathBuf>,
 }
 
 #[derive(Debug)]
@@ -360,6 +387,8 @@ impl Service {
             pending_file_offers: HashMap::new(),
             #[cfg(feature = "file_drop")]
             file_drop_source: Some(file_drop_source(None)),
+            #[cfg(feature = "file_drop")]
+            pending_drag: None,
         };
         Ok(service)
     }
@@ -1005,10 +1034,20 @@ impl Service {
 
     /// Route a file-drop event to the outgoing transfer path.
     ///
-    /// `Entered` / `Cancelled` are advisory and are just logged for now; the
-    /// real work is `Dropped`, where we resolve the target edge → active
-    /// client → (address, fingerprint) and kick off one `SendPath` command
-    /// per dropped path.
+    /// Drag-continues UX: backends pull file URIs synchronously at
+    /// `data_device::enter` / `IDropTarget::DragEnter` and emit
+    /// `DragStarted`. We dispatch `SendPath` immediately on `DragStarted` so
+    /// the QUIC transfer can race the user's cursor across to the remote
+    /// screen. The legacy `Dropped` event still fires if the user releases
+    /// *on* the edge strip; we de-dup that against `pending_drag` so the
+    /// same files aren't sent twice.
+    ///
+    /// `Cancelled` clears the pending drag state. The receiver-side abort
+    /// (sending `FileCtrl::Abort` for in-flight xfer_ids) is not yet wired
+    /// — see the open design question in the PR-C stash. As a result, if
+    /// the user starts a drag over the strip and then cancels off-screen,
+    /// the file may still arrive at the remote and surface in the offer
+    /// dialog, where the user can decline. Acceptable until follow-up.
     #[cfg(feature = "file_drop")]
     fn handle_file_drop_event(&mut self, event: FileDropEvent) {
         let (position, paths) = match event {
@@ -1017,34 +1056,54 @@ impl Service {
                 return;
             }
             FileDropEvent::Cancelled(p) => {
-                log::debug!("drag cancelled at {p}");
+                if let Some(pd) = self.pending_drag.take() {
+                    log::info!(
+                        "drag cancelled at {p} (clearing pending eager transfer for edge {} — \
+                         {} in-flight path(s); receiver may still see an offer to decline)",
+                        pd.position,
+                        pd.paths.len()
+                    );
+                } else {
+                    log::debug!("drag cancelled at {p}");
+                }
                 return;
             }
             FileDropEvent::DragStarted { position, paths } => {
-                // Drag-continues flow (plan §1): the backend pulled file
-                // URIs at data_device::enter / IDropTarget::DragEnter. For
-                // this spike pass we just log — the full pipeline (eager
-                // QUIC transfer + receiver-side pending-drop state + drop-
-                // confirmation dialog) lands with tasks 24/25/31. Falling
-                // through to the legacy SendPath dispatch so the spike
-                // still transfers the file end-to-end.
                 log::info!(
-                    "file drag started at edge {position}: {} path(s) {:?}",
+                    "file drag started at edge {position}: {} path(s) {:?} — dispatching eager transfer",
                     paths.len(),
                     paths
                 );
+                self.pending_drag = Some(PendingDrag {
+                    position,
+                    paths: paths.clone(),
+                });
                 (position, paths)
             }
             FileDropEvent::DragEndedEarly { position, paths } => {
-                // User released *on* the strip instead of crossing — same
-                // as above for the spike, fall through to legacy dispatch.
+                if self.drag_already_dispatched(position, &paths) {
+                    log::info!(
+                        "file drag ended early at edge {position}: already dispatched on DragStarted; suppressing duplicate"
+                    );
+                    self.pending_drag = None;
+                    return;
+                }
                 log::info!(
                     "file drag ended early at edge {position}: {} path(s)",
                     paths.len()
                 );
                 (position, paths)
             }
-            FileDropEvent::Dropped { position, paths } => (position, paths),
+            FileDropEvent::Dropped { position, paths } => {
+                if self.drag_already_dispatched(position, &paths) {
+                    log::info!(
+                        "drop at {position}: already dispatched on DragStarted; suppressing duplicate SendPath"
+                    );
+                    self.pending_drag = None;
+                    return;
+                }
+                (position, paths)
+            }
         };
         if paths.is_empty() {
             return;
@@ -1058,6 +1117,7 @@ impl Service {
             log::warn!(
                 "file drop at {position}: no connected client at that edge (peer must have previously connected for the fingerprint to be known)"
             );
+            self.pending_drag = None;
             return;
         };
 
@@ -1068,6 +1128,21 @@ impl Service {
                 target_fingerprint: target_fp.clone(),
                 root: path,
             });
+        }
+    }
+
+    /// True when an eager `DragStarted` has already dispatched `SendPath`
+    /// for the same edge + path set, so a subsequent `Dropped` /
+    /// `DragEndedEarly` for the same drag should be a no-op.
+    #[cfg(feature = "file_drop")]
+    fn drag_already_dispatched(
+        &self,
+        position: input_capture::Position,
+        paths: &[std::path::PathBuf],
+    ) -> bool {
+        match &self.pending_drag {
+            Some(pd) => pd.position == position && pd.paths == paths,
+            None => false,
         }
     }
 
@@ -1183,6 +1258,11 @@ impl Service {
             self.capture.create(handle, pos, CaptureType::Default);
             self.broadcast_client(handle);
             log::info!("activated client {handle} ({pos})");
+            /* offer any stashed clipboard payload now that the cursor has
+             * crossed into this client. Receiver gets the standard
+             * accept/decline file-offer dialog. */
+            #[cfg(feature = "clipboard")]
+            self.dispatch_pending_clipboard_to(handle);
         }
     }
 
@@ -1339,18 +1419,17 @@ impl Service {
         );
     }
 
-    /// Stash the oversize text and prompt the sender-side frontend.
+    /// Stash the oversize text silently. It will be offered to the next
+    /// client the cursor crosses into (see `dispatch_pending_clipboard_to`),
+    /// where the receiver shows the standard accept/decline dialog. No
+    /// sender-side prompt — the user shouldn't be interrupted at copy time.
     #[cfg(feature = "clipboard")]
     fn handle_clipboard_oversize(&mut self, content: String) {
-        let bytes = content.len() as u64;
-        let preview = content.chars().take(120).collect::<String>();
-        let target_client = self.active_transfer_target_handle().unwrap_or(0);
-        self.pending_clipboard_overflow = Some(content);
-        self.notify_frontend(FrontendEvent::ClipboardOverflow {
-            client: target_client,
-            bytes,
-            preview,
-        });
+        log::debug!(
+            "stashed oversize clipboard text ({} bytes) — will offer on next cursor cross",
+            content.len()
+        );
+        self.pending_clipboard_overflow = Some((std::time::Instant::now(), content));
     }
 
     /// Fallback path when the `clipboard` feature is disabled — we never
@@ -1359,30 +1438,32 @@ impl Service {
     #[cfg(not(feature = "clipboard"))]
     fn handle_clipboard_oversize(&mut self, _content: String) {}
 
+    /// Stash the clipboard image silently. Same model as oversize text —
+    /// offered to the receiver on the next cursor cross. No sender prompt.
     #[cfg(feature = "clipboard")]
     fn handle_clipboard_image(&mut self, png: Vec<u8>, width: u32, height: u32) {
-        let bytes = png.len() as u64;
-        let target_client = self.active_transfer_target_handle().unwrap_or(0);
-        self.pending_clipboard_image = Some(png);
-        self.notify_frontend(FrontendEvent::ClipboardImageDetected {
-            client: target_client,
-            bytes,
-            width,
-            height,
-        });
+        log::debug!(
+            "stashed clipboard image {width}x{height} ({} bytes) — will offer on next cursor cross",
+            png.len()
+        );
+        self.pending_clipboard_image = Some((std::time::Instant::now(), png));
     }
 
     #[cfg(not(feature = "clipboard"))]
     fn handle_clipboard_image(&mut self, _png: Vec<u8>, _width: u32, _height: u32) {}
 
-    /// Handle the sender-side response to a `ClipboardOverflow` prompt.
+    /// Legacy sender-side response handler for the now-removed clipboard
+    /// overflow prompt. Kept callable for IPC compatibility with older
+    /// frontends; the GTK frontend no longer issues this request because
+    /// the prompt now appears on the receiver instead. If invoked, we
+    /// honour the requested action against any still-stashed payload.
     #[cfg(feature = "clipboard")]
     fn handle_respond_clipboard_overflow(
         &mut self,
         decision: lan_mouse_ipc::ClipboardOverflowDecision,
     ) {
         use lan_mouse_ipc::ClipboardOverflowDecision as D;
-        let Some(content) = self.pending_clipboard_overflow.take() else {
+        let Some((_, content)) = self.pending_clipboard_overflow.take() else {
             log::debug!("RespondClipboardOverflow with no pending content (already acted on?)");
             return;
         };
@@ -1416,10 +1497,11 @@ impl Service {
         }
     }
 
+    /// Legacy sender-side response handler — see overflow variant above.
     #[cfg(feature = "clipboard")]
     fn handle_respond_clipboard_image(&mut self, decision: lan_mouse_ipc::ClipboardImageDecision) {
         use lan_mouse_ipc::ClipboardImageDecision as D;
-        let Some(png) = self.pending_clipboard_image.take() else {
+        let Some((_, png)) = self.pending_clipboard_image.take() else {
             log::debug!("RespondClipboardImage with no pending content");
             return;
         };
@@ -1427,6 +1509,82 @@ impl Service {
             D::Send => self.send_clipboard_as_file(&png, "png"),
             D::Skip => log::debug!("clipboard image skipped by user"),
         }
+    }
+
+    /// Cursor-cross hook: when a client becomes active, dispatch any
+    /// stashed clipboard payload to it as a file offer. The receiver-side
+    /// GTK frontend then shows the standard `present_file_offer` dialog.
+    /// Each pending payload is consumed at most once and only if its TTL
+    /// hasn't expired.
+    #[cfg(all(feature = "clipboard", feature = "file_drop"))]
+    fn dispatch_pending_clipboard_to(&mut self, handle: ClientHandle) {
+        let now = std::time::Instant::now();
+
+        if let Some((stamp, png)) = self.pending_clipboard_image.take() {
+            if now.duration_since(stamp) <= PENDING_CLIPBOARD_TTL {
+                self.send_clipboard_to_handle(handle, &png, "png");
+            } else {
+                log::debug!(
+                    "discarding stashed clipboard image (age {:?} exceeds TTL)",
+                    now.duration_since(stamp)
+                );
+            }
+        }
+
+        if let Some((stamp, content)) = self.pending_clipboard_overflow.take() {
+            if now.duration_since(stamp) <= PENDING_CLIPBOARD_TTL {
+                let bytes = content.into_bytes();
+                self.send_clipboard_to_handle(handle, &bytes, "txt");
+            } else {
+                log::debug!(
+                    "discarding stashed clipboard text (age {:?} exceeds TTL)",
+                    now.duration_since(stamp)
+                );
+            }
+        }
+    }
+
+    /// Without the `file_drop` (QUIC) feature there's no transport for
+    /// clipboard-as-file, so cursor-cross dispatch is a no-op.
+    #[cfg(all(feature = "clipboard", not(feature = "file_drop")))]
+    fn dispatch_pending_clipboard_to(&mut self, _handle: ClientHandle) {
+        // Drop any stash so it doesn't accumulate indefinitely.
+        let _ = self.pending_clipboard_image.take();
+        let _ = self.pending_clipboard_overflow.take();
+    }
+
+    #[cfg(not(feature = "clipboard"))]
+    fn dispatch_pending_clipboard_to(&mut self, _handle: ClientHandle) {}
+
+    /// Per-handle variant of `send_clipboard_as_file`. Resolves the QUIC
+    /// target for the explicit handle so we don't depend on which client
+    /// `client_manager` reports as "active first" at the moment of dispatch.
+    #[cfg(all(feature = "clipboard", feature = "file_drop"))]
+    fn send_clipboard_to_handle(&self, handle: ClientHandle, content: &[u8], ext: &'static str) {
+        let Some(ft) = &self.file_transfer else {
+            log::warn!("clipboard offer dropped: file-transfer service unavailable");
+            return;
+        };
+        let Some((target_addr, fingerprint)) = self.transfer_target_for_handle(handle) else {
+            log::warn!(
+                "clipboard offer dropped: no known fingerprint for client {handle} \
+                 (peer must have previously connected over DTLS)"
+            );
+            return;
+        };
+        let Some(path) = write_clipboard_temp(content, ext) else {
+            log::warn!("failed to write clipboard temp file");
+            return;
+        };
+        log::info!(
+            "offering stashed clipboard ({} bytes, .{ext}) to client {handle} → {target_addr}",
+            content.len()
+        );
+        ft.try_send_command(file_transfer::Command::SendPath {
+            target_addr,
+            target_fingerprint: fingerprint,
+            root: path,
+        });
     }
 
     /// Write the given bytes to a session-scoped temp file and dispatch a
@@ -1484,19 +1642,6 @@ impl Service {
                 .map(|i| i.fingerprint.clone())?;
             let quic_addr = SocketAddr::new(addr.ip(), self.config.file_transfer_port());
             return Some((quic_addr, fingerprint));
-        }
-        None
-    }
-
-    /// Pure-lookup variant that returns the active client's handle — used
-    /// when we only want to populate the `client:` field of an IPC event
-    /// without having to resolve the fingerprint.
-    #[cfg(feature = "clipboard")]
-    fn active_transfer_target_handle(&self) -> Option<ClientHandle> {
-        for (h, _, state) in self.client_manager.get_client_states() {
-            if state.active {
-                return Some(h);
-            }
         }
         None
     }

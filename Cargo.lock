@@ -2116,6 +2116,7 @@ dependencies = [
  "lan-mouse-gtk",
  "lan-mouse-ipc",
  "lan-mouse-proto",
+ "lan-mouse-service",
  "libc",
  "local-channel",
  "log",
@@ -2150,8 +2151,10 @@ dependencies = [
  "clap",
  "futures",
  "lan-mouse-ipc",
+ "lan-mouse-service",
  "thiserror 2.0.18",
  "tokio",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2164,11 +2167,13 @@ dependencies = [
  "hostname",
  "if-addrs",
  "lan-mouse-ipc",
+ "lan-mouse-service",
  "libadwaita",
  "log",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2199,6 +2204,16 @@ dependencies = [
  "num_enum",
  "paste",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "lan-mouse-service"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "thiserror 2.0.18",
+ "windows-service",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4480,6 +4495,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7781fa89eaf60850ac3d2da7af8e5242a5ea78d1a11c49bf2910bb5a73853eb5"
 dependencies = [
  "windows-link 0.2.1",
+]
+
+[[package]]
+name = "windows-service"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "193cae8e647981c35bc947fdd57ba7928b1fa0d4a79305f6dd2dc55221ac35ac"
+dependencies = [
+ "bitflags 2.11.0",
+ "widestring",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

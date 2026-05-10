@@ -78,6 +78,52 @@
             </child>
           </object>
         </child>
+        <child>
+          <object class="AdwPreferencesGroup" id="windows_service_group">
+            <property name="title" translatable="yes">Windows Service</property>
+            <property name="description" translatable="yes">Install Lan Mouse+ as a Windows Service so it keeps accepting input even when a UAC prompt or admin app is on top. Each action requires a one-time UAC confirmation.</property>
+            <property name="visible">false</property>
+            <child>
+              <object class="AdwActionRow" id="service_status_row">
+                <property name="title">Status</property>
+                <property name="subtitle">Loading…</property>
+              </object>
+            </child>
+            <child>
+              <object class="AdwActionRow">
+                <property name="title">Service control</property>
+                <property name="subtitle">Install or uninstall the service, then start or stop it</property>
+                <child type="suffix">
+                  <object class="GtkBox">
+                    <property name="spacing">6</property>
+                    <property name="valign">center</property>
+                    <child>
+                      <object class="GtkButton" id="service_install_btn">
+                        <property name="label" translatable="yes">Install</property>
+                        <property name="tooltip-text" translatable="yes">Register the service with the Service Control Manager</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkButton" id="service_start_btn">
+                        <property name="label" translatable="yes">Start</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkButton" id="service_stop_btn">
+                        <property name="label" translatable="yes">Stop</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkButton" id="service_uninstall_btn">
+                        <property name="label" translatable="yes">Uninstall</property>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+              </object>
+            </child>
+          </object>
+        </child>
       </object>
     </child>
   </template>

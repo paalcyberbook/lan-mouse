@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use std::ops::BitOrAssign;
 use std::time::Duration;
 use tokio::task::AbortHandle;
+use windows::Win32::Foundation::GetLastError;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE,
     MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
@@ -103,12 +104,40 @@ impl WindowsEmulation {
     }
 }
 
+/// Submit a single `INPUT` to the OS. We retry a small number of times to
+/// ride over transient contention, then drop the event and log.
+///
+/// IMPORTANT: when the foreground window is at higher integrity than this
+/// process (UAC dialog, app launched "Run as administrator"), Windows
+/// silently filters the call due to UIPI — `SendInput` returns 0 with
+/// `GetLastError() == ERROR_ACCESS_DENIED`. The previous implementation
+/// looped forever in that case, wedging the runtime until the elevated
+/// window lost focus. Now we cap retries and surface the cause so the user
+/// has a chance to install the Windows Service mode (which runs at higher
+/// integrity and can inject into elevated windows).
 fn send_input_safe(input: INPUT) {
+    const MAX_ATTEMPTS: u32 = 3;
     unsafe {
-        loop {
-            /* retval = number of successfully submitted events */
+        for attempt in 0..MAX_ATTEMPTS {
             if SendInput(&[input], std::mem::size_of::<INPUT>() as i32) > 0 {
-                break;
+                return;
+            }
+            let err = GetLastError();
+            if attempt + 1 == MAX_ATTEMPTS {
+                if err.0 == 5
+                /* ERROR_ACCESS_DENIED */
+                {
+                    log::warn!(
+                        "SendInput denied by UIPI (foreground window likely runs elevated). \
+                         Install Lan Mouse+ as a Windows Service to control admin/UAC windows."
+                    );
+                } else {
+                    log::warn!(
+                        "SendInput failed after {MAX_ATTEMPTS} attempts: WinErr={}",
+                        err.0
+                    );
+                }
+                return;
             }
         }
     }

@@ -8,6 +8,7 @@ members = [
     "lan-mouse-gtk",
     "lan-mouse-launcher",
     "lan-mouse-proto",
+    "lan-mouse-service",
 ]
 
 [package]
@@ -95,6 +96,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_Storage_FileSystem",
     "Win32_Security",
 ] }
+lan-mouse-service = { path = "lan-mouse-service", version = "0.1.0" }
 
 [features]
 default = [

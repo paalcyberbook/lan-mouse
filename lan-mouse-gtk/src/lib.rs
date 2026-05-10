@@ -236,25 +236,14 @@ fn build_ui(app: &Application) {
                     FrontendEvent::FileTransferFinished { xfer_id, result } => {
                         window.show_file_transfer_finished_toast(xfer_id, result);
                     }
-                    FrontendEvent::ClipboardOverflow {
-                        client,
-                        bytes,
-                        preview,
-                    } => {
-                        file_transfer_window::present_clipboard_overflow_prompt(
-                            &window, client, bytes, preview,
-                        );
-                    }
-                    FrontendEvent::ClipboardImageDetected {
-                        client,
-                        bytes,
-                        width,
-                        height,
-                    } => {
-                        file_transfer_window::present_clipboard_image_prompt(
-                            &window, client, bytes, width, height,
-                        );
-                    }
+                    // Legacy sender-side clipboard prompts. The daemon no
+                    // longer emits these — the prompt now appears on the
+                    // receiver via FileOfferIncoming when the cursor crosses
+                    // into a client. Kept as no-op arms so older daemons
+                    // (still emitting these events) don't make us panic on
+                    // an exhaustive match.
+                    FrontendEvent::ClipboardOverflow { .. } => {}
+                    FrontendEvent::ClipboardImageDetected { .. } => {}
                 }
             }
         }

@@ -22,3 +22,16 @@ serde_json = "1"
 
 [build-dependencies]
 glib-build-tools = { version = "0.20.0" }
+
+# Windows-only: ShellExecuteExW for the "Run as administrator" elevation
+# used by the Windows Service control buttons in the settings panel.
+# Win32_System_Registry is needed because SHELLEXECUTEINFOW carries an HKEY
+# field, and windows-sys gates the struct on that feature.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Registry",
+] }
+lan-mouse-service = { path = "../lan-mouse-service", version = "0.1.0" }

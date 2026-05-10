@@ -1,7 +1,7 @@
 use adw::subclass::prelude::*;
-use adw::{ActionRow, ComboRow, SwitchRow, prelude::*};
+use adw::{ActionRow, ComboRow, PreferencesGroup, SwitchRow, prelude::*};
 use glib::subclass::InitializingObject;
-use gtk::{CompositeTemplate, StringList, glib};
+use gtk::{Button, CompositeTemplate, StringList, glib};
 
 use lan_mouse_ipc::Settings;
 
@@ -24,6 +24,18 @@ pub struct SettingsWindow {
     pub listen_ipv4_combo: TemplateChild<ComboRow>,
     #[template_child]
     pub listen_ipv6_combo: TemplateChild<ComboRow>,
+    #[template_child]
+    pub windows_service_group: TemplateChild<PreferencesGroup>,
+    #[template_child]
+    pub service_status_row: TemplateChild<ActionRow>,
+    #[template_child]
+    pub service_install_btn: TemplateChild<Button>,
+    #[template_child]
+    pub service_start_btn: TemplateChild<Button>,
+    #[template_child]
+    pub service_stop_btn: TemplateChild<Button>,
+    #[template_child]
+    pub service_uninstall_btn: TemplateChild<Button>,
 }
 
 #[glib::object_subclass]
@@ -76,6 +88,12 @@ impl ObjectImpl for SettingsWindow {
 
         self.listen_ipv4_combo.set_model(Some(&ipv4_list));
         self.listen_ipv6_combo.set_model(Some(&ipv6_list));
+
+        // Windows-only: surface the service-management panel and wire up
+        // the install/start/stop/uninstall buttons. Other platforms keep
+        // the group hidden (default `visible=false` from the .ui file).
+        #[cfg(windows)]
+        self.setup_windows_service_panel();
     }
 }
 
@@ -179,4 +197,102 @@ impl SettingsWindow {
     pub fn set_release_bind_label(&self, keys: &str) {
         self.release_bind_row.set_subtitle(keys);
     }
+}
+
+#[cfg(windows)]
+impl SettingsWindow {
+    fn setup_windows_service_panel(&self) {
+        self.windows_service_group.set_visible(true);
+        self.refresh_service_status();
+
+        // Each control button relaunches the lan-mouse CLI elevated via
+        // ShellExecuteEx("runas") — that triggers the standard Windows UAC
+        // prompt. After the elevated process exits we refresh the status.
+        let actions = [
+            (&self.service_install_btn, "install"),
+            (&self.service_start_btn, "start"),
+            (&self.service_stop_btn, "stop"),
+            (&self.service_uninstall_btn, "uninstall"),
+        ];
+        for (btn, action) in actions {
+            let action: &'static str = action;
+            let win = self.obj().downgrade();
+            btn.connect_clicked(move |_| {
+                if let Err(e) = relaunch_elevated(&["cli", "service", action]) {
+                    log::warn!("failed to relaunch elevated for `{action}`: {e}");
+                }
+                // Allow SCM a moment to transition before we re-read.
+                let win = win.clone();
+                glib::timeout_add_local_once(std::time::Duration::from_millis(1500), move || {
+                    if let Some(w) = win.upgrade() {
+                        w.imp().refresh_service_status();
+                    }
+                });
+            });
+        }
+    }
+
+    fn refresh_service_status(&self) {
+        use lan_mouse_service::InstalledState as S;
+        let (text, install_enabled, uninstall_enabled, start_enabled, stop_enabled) =
+            match lan_mouse_service::status() {
+                Ok(S::NotInstalled) => ("Not installed", true, false, false, false),
+                Ok(S::Stopped) => ("Installed — stopped", false, true, true, false),
+                Ok(S::Running) => ("Installed — running", false, true, false, true),
+                Ok(S::StartPending) => ("Starting…", false, true, false, true),
+                Ok(S::StopPending) => ("Stopping…", false, true, true, false),
+                Ok(S::Other) => ("Installed — unknown state", false, true, true, true),
+                Err(e) => {
+                    log::debug!("service status query failed: {e}");
+                    (
+                        "Status unavailable (try opening as administrator)",
+                        true,
+                        true,
+                        true,
+                        true,
+                    )
+                }
+            };
+        self.service_status_row.set_subtitle(text);
+        self.service_install_btn.set_sensitive(install_enabled);
+        self.service_uninstall_btn.set_sensitive(uninstall_enabled);
+        self.service_start_btn.set_sensitive(start_enabled);
+        self.service_stop_btn.set_sensitive(stop_enabled);
+    }
+}
+
+#[cfg(windows)]
+fn relaunch_elevated(args: &[&str]) -> Result<(), std::io::Error> {
+    use std::iter::once;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::{
+        SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
+
+    let exe = std::env::current_exe()?;
+    let exe_w: Vec<u16> = exe.as_os_str().encode_wide().chain(once(0)).collect();
+    let verb_w: Vec<u16> = "runas".encode_utf16().chain(once(0)).collect();
+    let params = args.join(" ");
+    let params_w: Vec<u16> = params.encode_utf16().chain(once(0)).collect();
+
+    let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    info.fMask = SEE_MASK_NOCLOSEPROCESS;
+    info.lpVerb = verb_w.as_ptr();
+    info.lpFile = exe_w.as_ptr();
+    info.lpParameters = params_w.as_ptr();
+    info.nShow = SW_HIDE as i32;
+
+    let ok = unsafe { ShellExecuteExW(&mut info) };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // We don't wait on the process here — the caller schedules a status
+    // refresh on a glib timeout. Waiting synchronously would freeze the
+    // GTK main loop until the user dismissed the UAC prompt.
+    if !info.hProcess.is_null() {
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(info.hProcess) };
+    }
+    Ok(())
 }

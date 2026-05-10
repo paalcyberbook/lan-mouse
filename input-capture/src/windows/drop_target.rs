@@ -369,7 +369,20 @@ impl IDropTarget_Impl for DropTargetImpl_Impl {
         _pt: &POINTL,
         effect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
-        let is_file = unsafe { data.as_ref().map(|d| has_file_format(d)).unwrap_or(false) };
+        // Drag-continues UX (mirror of layer_shell_dnd.rs:595): pull
+        // CF_HDROP paths synchronously here so the service can kick off an
+        // eager QUIC transfer while the user's cursor is still travelling
+        // toward the remote screen, instead of waiting for `Drop` to fire.
+        let paths_opt = unsafe {
+            data.as_ref().and_then(|d| {
+                if has_file_format(d) {
+                    Some(extract_cf_hdrop(d))
+                } else {
+                    None
+                }
+            })
+        };
+        let is_file = paths_opt.is_some();
         unsafe {
             *effect = if is_file {
                 DROPEFFECT_COPY
@@ -377,8 +390,25 @@ impl IDropTarget_Impl for DropTargetImpl_Impl {
                 DROPEFFECT_NONE
             };
         }
-        if is_file {
+        if let Some(paths) = paths_opt {
+            log::info!(
+                "windows DnD: DragEnter at edge {} — extracted {} path(s): {:?}",
+                self.edge,
+                paths.len(),
+                paths
+            );
             let _ = self.events.send(FileDropEvent::Entered(self.edge));
+            if !paths.is_empty() {
+                let _ = self.events.send(FileDropEvent::DragStarted {
+                    position: self.edge,
+                    paths,
+                });
+            }
+        } else {
+            log::debug!(
+                "windows DnD: DragEnter at edge {} — IDataObject has no CF_HDROP, ignoring",
+                self.edge
+            );
         }
         Ok(())
     }
@@ -396,6 +426,7 @@ impl IDropTarget_Impl for DropTargetImpl_Impl {
     }
 
     fn DragLeave(&self) -> windows::core::Result<()> {
+        log::info!("windows DnD: DragLeave at edge {}", self.edge);
         let _ = self.events.send(FileDropEvent::Cancelled(self.edge));
         Ok(())
     }
@@ -420,6 +451,11 @@ impl IDropTarget_Impl for DropTargetImpl_Impl {
             };
         }
         if !paths.is_empty() {
+            log::info!(
+                "windows DnD: Drop on edge strip {} — {} path(s) (legacy fallback path; eager DragStarted should have fired earlier)",
+                self.edge,
+                paths.len()
+            );
             let _ = self.events.send(FileDropEvent::Dropped {
                 position: self.edge,
                 paths,

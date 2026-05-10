@@ -110,6 +110,35 @@ fn run() -> Result<(), LanMouseError> {
                     r => r?,
                 }
             }
+            #[cfg(windows)]
+            Command::Service => {
+                // SCM dispatch entry. The service runs as LocalSystem in
+                // session 0 and acts as a supervisor: it spawns
+                // `lan-mouse.exe service-worker` into the active console
+                // session at SYSTEM integrity (see lan_mouse_service::
+                // session_helper). The supervisor doesn't run the daemon
+                // itself — only the worker does, so the existing IPC port
+                // bind happens exactly once in the user session.
+                drop(config); // free the watcher before handing off
+                lan_mouse_service::run_service_dispatch().map_err(|e| {
+                    log::error!("SCM dispatch failed: {e}");
+                    io::Error::other(e.to_string())
+                })?;
+            }
+            #[cfg(windows)]
+            Command::ServiceWorker => {
+                // Spawned by the supervisor into the user's session at
+                // SYSTEM integrity. From here on it's the regular daemon
+                // — the only difference vs. plain `daemon` mode is that
+                // we got here via CreateProcessAsUserW with a retargeted
+                // SYSTEM token, so SendInput can reach UAC dialogs.
+                match run_async(run_service(config)) {
+                    Err(LanMouseError::Service(ServiceError::IpcListen(
+                        IpcListenerCreationError::AlreadyRunning,
+                    ))) => log::info!("service-worker: daemon already running on this host"),
+                    r => r?,
+                }
+            }
         },
         None => {
             //  otherwise start the service as a child process and

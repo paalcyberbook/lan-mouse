@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Nautilus right-click → Scripts → "Send via Lan Mouse+"
+#
+# Sends each selected file/folder to the currently-active (or only-connected)
+# Lan Mouse+ client by invoking the lan-mouse CLI. Feedback is surfaced via
+# notify-send so the user sees what happened.
+#
+# Selected paths arrive both as positional args ($@) and via the env var
+# NAUTILUS_SCRIPT_SELECTED_FILE_PATHS (newline-separated). We prefer the env
+# var because Nautilus splits paths with embedded spaces correctly there.
+#
+# Reinstall by re-running `make install` (once the project ships this) or
+# copying this file to ~/.local/share/nautilus/scripts/ and chmod +x.
+
+set -u
+
+LAN_MOUSE_BIN="${LAN_MOUSE_BIN:-lan-mouse}"
+
+if ! command -v "$LAN_MOUSE_BIN" >/dev/null 2>&1; then
+    notify-send --app-name="Lan Mouse+" --urgency=critical \
+        "Lan Mouse+" "lan-mouse binary not found in PATH"
+    exit 1
+fi
+
+# Prefer NAUTILUS_SCRIPT_SELECTED_FILE_PATHS (newline-separated, decoded).
+if [ -n "${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS:-}" ]; then
+    mapfile -t paths < <(printf '%s' "$NAUTILUS_SCRIPT_SELECTED_FILE_PATHS")
+else
+    paths=("$@")
+fi
+
+if [ ${#paths[@]} -eq 0 ]; then
+    notify-send --app-name="Lan Mouse+" --urgency=normal \
+        "Lan Mouse+" "No files selected"
+    exit 0
+fi
+
+for p in "${paths[@]}"; do
+    [ -z "$p" ] && continue
+    "$LAN_MOUSE_BIN" cli send-file --path "$p"
+done
