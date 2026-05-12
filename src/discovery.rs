@@ -179,7 +179,11 @@ impl DiscoveryService {
                             .unwrap_or_default()
                             .opposite();
 
-                        let addrs: Vec<IpAddr> = info.get_addresses().iter().copied().collect();
+                        let addrs: Vec<IpAddr> = info
+                            .get_addresses()
+                            .iter()
+                            .map(|a| a.to_ip_addr())
+                            .collect();
 
                         if fingerprint.is_empty() {
                             continue;
