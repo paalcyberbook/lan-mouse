@@ -32,6 +32,9 @@ use std::{
 use log::{Level, Log, Metadata, Record};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use shadow_rs::shadow;
+
+shadow!(build);
 
 const DEFAULT_HOST: &str = "https://logger.cyberbook.id";
 const TOKEN_FILE: &str = "remote-log-token.json";
@@ -118,11 +121,18 @@ struct RemoteHandle {
     tx: SyncSender<LogEntry>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct TokenCache {
     client_id: String,
     token: String,
     name: String,
+    /// Last client-metadata JSON we successfully registered or PATCH'd
+    /// onto the server. Compared against the freshly-computed metadata
+    /// at every startup; a difference triggers a PATCH /v1/client which
+    /// the server turns into a new `metadata_version`. Optional so old
+    /// cache files (no `metadata` key) still load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    metadata: Option<Value>,
 }
 
 fn try_init_remote() -> Result<Option<RemoteHandle>, String> {
@@ -140,11 +150,20 @@ fn try_init_remote() -> Result<Option<RemoteHandle>, String> {
     let arch = env::consts::ARCH;
     let version = env!("CARGO_PKG_VERSION");
     let client_name = format!("lan-mouse-{os}-{host_name}");
-    let metadata = json!({
+
+    // Stable per-build / per-host attributes. These belong on the client
+    // record (which the server version-tracks via `metadata_version`),
+    // not on every log entry. Add new fields here only if they are
+    // stable for the lifetime of a process; per-line stuff (target,
+    // module path, …) goes into the entry payload below.
+    let client_metadata = json!({
         "os": os,
         "arch": arch,
         "hostname": host_name,
         "version": version,
+        "commit": build::SHORT_COMMIT,
+        "branch": build::BRANCH,
+        "build_time": build::BUILD_TIME,
     });
 
     let token_path = token_path()?;
@@ -155,12 +174,41 @@ fn try_init_remote() -> Result<Option<RemoteHandle>, String> {
     // exists. Means a user who ran the register helper once doesn't have
     // to keep `LOGGER_APIKEY` in their environment forever — handy on
     // Windows where Explorer-launched processes inherit a stale env.
-    let (token, source) = match load_cached_token(&token_path, &client_name) {
-        Some(t) => (t, "cached token"),
+    let (token, source, version_note) = match load_cached_entry(&token_path, &client_name) {
+        Some(cached) => {
+            // Client metadata may have shifted since the cache was
+            // written (most often: a version/commit bump). PATCH the
+            // server so the next log entry is tagged with the fresh
+            // metadata_version. The server is idempotent — an identical
+            // PATCH is a no-op and doesn't create a new version.
+            let token = cached.token.clone();
+            let note = if cached.metadata.as_ref() != Some(&client_metadata) {
+                match patch_client_metadata(&host, &token, &client_metadata) {
+                    Ok(()) => {
+                        let updated = TokenCache {
+                            client_id: cached.client_id,
+                            token: cached.token,
+                            name: cached.name,
+                            metadata: Some(client_metadata.clone()),
+                        };
+                        let _ = persist_token(&token_path, &updated);
+                        "metadata PATCH'd (new version)"
+                    }
+                    Err(e) => {
+                        eprintln!("remote_log: metadata PATCH failed (non-fatal): {e}");
+                        "metadata PATCH failed"
+                    }
+                }
+            } else {
+                "metadata unchanged"
+            };
+            (token, "cached token", note)
+        }
         None => match read_api_key() {
             Some(api_key) => {
-                let t = register_new(&host, &api_key, &client_name, &metadata, &token_path)?;
-                (t, "freshly registered")
+                let t =
+                    register_new(&host, &api_key, &client_name, &client_metadata, &token_path)?;
+                (t, "freshly registered", "metadata set at register")
             }
             None => {
                 let msg = format!(
@@ -175,7 +223,7 @@ fn try_init_remote() -> Result<Option<RemoteHandle>, String> {
         },
     };
     let status_line = format!(
-        "shipping to {host} as {client_name} (source: {source}, cache: {})",
+        "shipping to {host} as {client_name} (source: {source}, {version_note}, cache: {})",
         token_path.display()
     );
     eprintln!("remote_log: {status_line}");
@@ -183,13 +231,22 @@ fn try_init_remote() -> Result<Option<RemoteHandle>, String> {
 
     let (tx, rx) = mpsc::sync_channel::<LogEntry>(QUEUE_CAP);
     let host_clone = host.clone();
-    let meta_clone = metadata.clone();
     thread::Builder::new()
         .name("remote-log-shipper".into())
-        .spawn(move || shipper_loop(host_clone, token, meta_clone, rx))
+        .spawn(move || shipper_loop(host_clone, token, rx))
         .map_err(|e| format!("spawn shipper: {e}"))?;
 
     Ok(Some(RemoteHandle { tx }))
+}
+
+fn patch_client_metadata(host: &str, token: &str, metadata: &Value) -> Result<(), String> {
+    ureq::patch(&format!("{host}/v1/client"))
+        .set("Authorization", &format!("Bearer {token}"))
+        .set("Content-Type", "application/json")
+        .timeout(HTTP_TIMEOUT)
+        .send_json(json!({ "metadata": metadata }))
+        .map_err(|e| format!("PATCH /v1/client: {e}"))?;
+    Ok(())
 }
 
 fn read_api_key() -> Option<String> {
@@ -199,11 +256,11 @@ fn read_api_key() -> Option<String> {
         .filter(|k| !k.trim().is_empty())
 }
 
-fn load_cached_token(token_path: &Path, client_name: &str) -> Option<String> {
+fn load_cached_entry(token_path: &Path, client_name: &str) -> Option<TokenCache> {
     let raw = fs::read_to_string(token_path).ok()?;
     let cached: TokenCache = serde_json::from_str(&raw).ok()?;
     if cached.name == client_name && !cached.token.is_empty() {
-        Some(cached.token)
+        Some(cached)
     } else {
         None
     }
@@ -216,7 +273,7 @@ fn register_new(
     metadata: &Value,
     token_path: &Path,
 ) -> Result<String, String> {
-    let resp: TokenCache = ureq::post(&format!("{host}/v1/register"))
+    let resp: RegisterResp = ureq::post(&format!("{host}/v1/register"))
         .set("X-API-Key", api_key)
         .set("Content-Type", "application/json")
         .timeout(HTTP_TIMEOUT)
@@ -226,14 +283,15 @@ fn register_new(
         }))
         .map_err(|e| format!("register: {e}"))?
         .into_json::<RegisterResp>()
-        .map(|r| TokenCache {
-            client_id: r.client_id,
-            token: r.token,
-            name: client_name.to_string(),
-        })
         .map_err(|e| format!("register parse: {e}"))?;
-    persist_token(token_path, &resp)?;
-    Ok(resp.token)
+    let cache = TokenCache {
+        client_id: resp.client_id,
+        token: resp.token,
+        name: client_name.to_string(),
+        metadata: Some(metadata.clone()),
+    };
+    persist_token(token_path, &cache)?;
+    Ok(cache.token)
 }
 
 #[derive(Deserialize)]
@@ -296,7 +354,7 @@ fn token_path() -> Result<PathBuf, String> {
     Ok(config_dir()?.join(TOKEN_FILE))
 }
 
-fn shipper_loop(host: String, token: String, meta: Value, rx: Receiver<LogEntry>) {
+fn shipper_loop(host: String, token: String, rx: Receiver<LogEntry>) {
     let endpoint = format!("{host}/v1/logs/bulk");
     let agent = ureq::AgentBuilder::new()
         .timeout(HTTP_TIMEOUT)
@@ -310,7 +368,7 @@ fn shipper_loop(host: String, token: String, meta: Value, rx: Receiver<LogEntry>
             Ok(entry) => buf.push(entry),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                flush(&agent, &endpoint, &token, &meta, &mut buf);
+                flush(&agent, &endpoint, &token, &mut buf);
                 return;
             }
         }
@@ -322,30 +380,32 @@ fn shipper_loop(host: String, token: String, meta: Value, rx: Receiver<LogEntry>
             }
         }
         if buf.len() >= MAX_BATCH || last_flush.elapsed() >= BATCH_INTERVAL {
-            flush(&agent, &endpoint, &token, &meta, &mut buf);
+            flush(&agent, &endpoint, &token, &mut buf);
             last_flush = Instant::now();
         }
     }
 }
 
-fn flush(agent: &ureq::Agent, endpoint: &str, token: &str, meta: &Value, buf: &mut Vec<LogEntry>) {
+fn flush(agent: &ureq::Agent, endpoint: &str, token: &str, buf: &mut Vec<LogEntry>) {
     if buf.is_empty() {
         return;
     }
+    // Per-entry metadata is only the per-line shape now: target + module.
+    // Everything stable (os, arch, hostname, version, commit, …) lives on
+    // the client record and is reachable on the query side via
+    // `metadata_version` / `?with_metadata=1`.
     let payload: Vec<Value> = buf
         .drain(..)
         .map(|e| {
-            let mut m = meta.clone();
-            if let Value::Object(map) = &mut m {
-                map.insert("target".into(), Value::String(e.target));
-                if let Some(module) = e.module {
-                    map.insert("module".into(), Value::String(module));
-                }
+            let mut m = serde_json::Map::new();
+            m.insert("target".into(), Value::String(e.target));
+            if let Some(module) = e.module {
+                m.insert("module".into(), Value::String(module));
             }
             json!({
                 "level": e.level,
                 "message": e.message,
-                "metadata": m,
+                "metadata": Value::Object(m),
             })
         })
         .collect();

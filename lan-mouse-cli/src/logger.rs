@@ -86,6 +86,28 @@ pub fn groups() -> Result<(), String> {
     Ok(())
 }
 
+pub fn versions() -> Result<(), String> {
+    let tok = load_token()?;
+    let resp: serde_json::Value = http_get(&tok.token, "/v1/client/metadata-versions")?;
+    let arr = resp
+        .as_array()
+        .ok_or_else(|| "unexpected response shape".to_string())?;
+    if arr.is_empty() {
+        println!("(no versions — start lan-mouse at least once to populate)");
+        return Ok(());
+    }
+    for v in arr {
+        let n = v.get("version").and_then(|x| x.as_u64()).unwrap_or(0);
+        let ts = v.get("created_at").and_then(|x| x.as_str()).unwrap_or("?");
+        let m = v
+            .get("metadata")
+            .map(|m| serde_json::to_string(m).unwrap_or_default())
+            .unwrap_or_default();
+        println!("v{n:<3}  {ts}  {m}");
+    }
+    Ok(())
+}
+
 pub fn tail(limit: u32, level: Option<&str>, mine_only: bool) -> Result<(), String> {
     let tok = load_token()?;
     let group_id = if mine_only {
@@ -98,15 +120,20 @@ pub fn tail(limit: u32, level: Option<&str>, mine_only: bool) -> Result<(), Stri
             .map(|g| g.id)
     };
     let limit = limit.clamp(1, 10000);
+    // Always ask for inline metadata snapshots so we can render
+    // `[os host]` regardless of which `metadata_version` produced the
+    // row. The cost is a single JOIN per query on the server side.
     let mut path = match &group_id {
-        Some(id) => format!("/v1/groups/{id}/logs?limit={limit}"),
-        None => format!("/v1/logs?limit={limit}"),
+        Some(id) => format!("/v1/groups/{id}/logs?limit={limit}&with_metadata=1"),
+        None => format!("/v1/logs?limit={limit}&with_metadata=1"),
     };
     if let Some(lvl) = level {
         path.push_str(&format!("&level={}", urlencode(lvl)));
     }
     let resp: serde_json::Value = http_get(&tok.token, &path)?;
-    let arr = resp.as_array().ok_or_else(|| "unexpected response shape".to_string())?;
+    let arr = resp
+        .as_array()
+        .ok_or_else(|| "unexpected response shape".to_string())?;
     // Server returns newest-first; flip so a terminal scroll shows oldest at top.
     for entry in arr.iter().rev() {
         print_entry(entry);
@@ -114,7 +141,10 @@ pub fn tail(limit: u32, level: Option<&str>, mine_only: bool) -> Result<(), Stri
     eprintln!(
         "--- {} entries, {} ---",
         arr.len(),
-        group_id.as_deref().map(|s| format!("group {s}")).unwrap_or_else(|| "own logs".to_string())
+        group_id
+            .as_deref()
+            .map(|s| format!("group {s}"))
+            .unwrap_or_else(|| "own logs".to_string())
     );
     Ok(())
 }
@@ -123,17 +153,27 @@ fn print_entry(entry: &serde_json::Value) {
     let time = entry.get("time").and_then(|v| v.as_str()).unwrap_or("--");
     let level = entry.get("level").and_then(|v| v.as_str()).unwrap_or("?");
     let msg = entry.get("message").and_then(|v| v.as_str()).unwrap_or("");
-    let host = entry
-        .get("metadata")
+    // Prefer the metadata_snapshot (resolved client metadata at ingest
+    // time, via ?with_metadata=1), then fall back to the per-entry
+    // metadata — for rows from older client builds that still embedded
+    // os/hostname in the entry payload itself.
+    let snap = entry
+        .get("metadata_snapshot")
+        .or_else(|| entry.get("metadata"));
+    let host = snap
         .and_then(|m| m.get("hostname"))
         .and_then(|v| v.as_str())
         .unwrap_or("?");
-    let os = entry
-        .get("metadata")
+    let os = snap
         .and_then(|m| m.get("os"))
         .and_then(|v| v.as_str())
         .unwrap_or("?");
-    println!("{time}  [{os:7} {host:20}] {level:5} {msg}");
+    let ver = entry
+        .get("metadata_version")
+        .and_then(|v| v.as_u64())
+        .map(|v| format!("v{v}"))
+        .unwrap_or_else(|| "--".to_string());
+    println!("{time}  [{os:7} {host:20} {ver:4}] {level:5} {msg}");
 }
 
 fn urlencode(s: &str) -> String {

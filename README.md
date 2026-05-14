@@ -506,11 +506,12 @@ lan-mouse cli logger tail --limit 50
 
 | Command | What it does |
 | --- | --- |
-| `lan-mouse cli logger status` | Show registered client name, client_id, and joined group (with invite_code if you're the owner). |
+| `lan-mouse cli logger status` | Show registered client name, client_id, joined group (with invite_code if you're the owner), and the last "shipper:" status line. |
 | `lan-mouse cli logger create <name>` | Create a new logging group and persist its id + invite_code locally. |
 | `lan-mouse cli logger join <invite>` | Join an existing group using its invite code. |
 | `lan-mouse cli logger groups` | List groups this client owns or is a member of. |
-| `lan-mouse cli logger tail [--limit N] [--level L] [--mine-only]` | Pull recent entries (default 50; max 10000) from the saved group, or from this host alone when no group is joined / when `--mine-only`. |
+| `lan-mouse cli logger versions` | List the metadata-version history of this client (each row = a snapshot, created when stable client metadata like `version` or `commit` changed between starts). Combine with `metadata_version` on a log row to know exactly which build emitted a line. |
+| `lan-mouse cli logger tail [--limit N] [--level L] [--mine-only]` | Pull recent entries (default 50; max 10000) from the saved group, or from this host alone when no group is joined / when `--mine-only`. Output is rendered as `[os hostname vN]` where `vN` is the client metadata version active at ingest time. |
 
 The CLI subcommands talk straight to the logger HTTP API — they don't
 require the local `lan-mouse` daemon to be running, only that the host

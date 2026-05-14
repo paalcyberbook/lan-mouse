@@ -125,8 +125,16 @@ pub enum LoggerAction {
     Join { invite_code: String },
     /// List the groups this client owns / is a member of.
     Groups,
+    /// List the metadata-version history of this client (server-side
+    /// snapshots created each time PATCH /v1/client received a changed
+    /// `metadata` payload). Use it with the `metadata_version` field on
+    /// a log row to reconstruct exactly which build/host produced the
+    /// line.
+    Versions,
     /// Print recent log entries from the currently-saved group (falls
-    /// back to this host's own logs if no group is joined).
+    /// back to this host's own logs if no group is joined). Always
+    /// includes the metadata snapshot so the `[os host]` prefix renders
+    /// even on rows from older client metadata versions.
     Tail {
         /// Max entries to fetch (server caps at 10000; default 50).
         #[arg(long, default_value_t = 50)]
@@ -272,6 +280,7 @@ fn handle_logger_action(action: LoggerAction) -> Result<(), CliError> {
         LoggerAction::Create { name } => logger::create(&name),
         LoggerAction::Join { invite_code } => logger::join(&invite_code),
         LoggerAction::Groups => logger::groups(),
+        LoggerAction::Versions => logger::versions(),
         LoggerAction::Tail {
             limit,
             level,
