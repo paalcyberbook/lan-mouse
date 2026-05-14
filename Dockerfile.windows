@@ -196,7 +196,9 @@ CMD ["bash", "-c", "\
     cp target/x86_64-pc-windows-gnu/release/lan-mouse.exe /output/bin/; \
     cp /usr/x86_64-w64-mingw32/sys-root/mingw/bin/*.dll /output/bin/ 2>/dev/null || true; \
     cp target/x86_64-pc-windows-gnu/release/launch-lan-mouse.exe /output/; \
-    printf 'Lan Mouse — portable build\\r\\n\\r\\nDouble-click launch-lan-mouse.exe to start.\\r\\nThe main binary and its DLLs live under the bin\\\\ folder.\\r\\n' > /output/README.txt; \
+    cp scripts/register-logger.cmd /output/; \
+    unix2dos /output/register-logger.cmd; \
+    printf 'Lan Mouse — portable build\\r\\n\\r\\nDouble-click launch-lan-mouse.exe to start.\\r\\nThe main binary and its DLLs live under the bin\\\\ folder.\\r\\n\\r\\nDebugging across hosts? Double-click register-logger.cmd to ship\\r\\nlogs to cb-logger so they can be merged with logs from your Linux\\r\\nand macOS hosts.\\r\\n' > /output/README.txt; \
     rm -f /build/lan-mouse-windows-x86_64.zip /build/lan-mouse-windows-x86_64-installer.exe; \
     (cd /output && zip -r /build/lan-mouse-windows-x86_64.zip .); \
     echo '==> Portable zip built: /build/lan-mouse-windows-x86_64.zip'; \

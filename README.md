@@ -459,15 +459,30 @@ turn it off again once the bug is fixed.
 **Enabling.** Export `LOGGER_APIKEY` (the shared API key) before starting
 `lan-mouse`. On first run the daemon registers itself, caches the
 returned bearer token at
-`$XDG_CONFIG_HOME/lan-mouse/remote-log-token.json` (0600), and starts a
-background shipper. If the env var is unset, the integration is a silent
-no-op — logging behaves exactly like `env_logger`.
+`$XDG_CONFIG_HOME/lan-mouse/remote-log-token.json` (0600 on Unix; under
+`%APPDATA%\lan-mouse\` on Windows), and starts a background shipper. If
+the env var is unset, the integration is a silent no-op — logging
+behaves exactly like `env_logger`.
+
+On Linux/macOS:
 
 ```sh
 # load the key into the current shell, then start the daemon as usual
 set -a; source ./apikey.env; set +a
 lan-mouse daemon
 # stderr: "remote_log: shipping to https://logger.cyberbook.id as lan-mouse-linux-<hostname>"
+```
+
+On Windows, **double-click `register-logger.cmd`** from the install
+directory (or the Start Menu shortcut "Lan Mouse → Register logging").
+The script prompts for the key (input is masked), runs the registration,
+and offers to persist `LOGGER_APIKEY` to your user environment and to
+join a group via invite code. Manual PowerShell equivalent:
+
+```powershell
+$env:LOGGER_APIKEY = "<paste-key-here>"
+lan-mouse.exe --help | Out-Null   # triggers register
+lan-mouse.exe cli logger status
 ```
 
 **Joining multiple hosts into one view.** Each host registers under its

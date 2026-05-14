@@ -48,6 +48,7 @@ Section "Lan Mouse+ (required)" SecCore
   SetOutPath "$INSTDIR"
   File /r "${STAGE_DIR}\bin"
   File "${STAGE_DIR}\README.txt"
+  File "${STAGE_DIR}\register-logger.cmd"
 
   WriteRegStr HKLM "Software\LanMouse" "InstallDir" "$INSTDIR"
 
@@ -72,6 +73,8 @@ Section "Start Menu shortcut" SecStartMenu
   CreateDirectory "$SMPROGRAMS\Lan Mouse"
   CreateShortCut "$SMPROGRAMS\Lan Mouse\Lan Mouse.lnk" \
     "$INSTDIR\bin\lan-mouse.exe" "" "$INSTDIR\bin\lan-mouse.exe" 0
+  CreateShortCut "$SMPROGRAMS\Lan Mouse\Register logging.lnk" \
+    "$INSTDIR\register-logger.cmd" "" "$INSTDIR\bin\lan-mouse.exe" 0
   CreateShortCut "$SMPROGRAMS\Lan Mouse\Uninstall.lnk" \
     "$INSTDIR\uninstall.exe"
 SectionEnd
@@ -148,10 +151,12 @@ Section "Uninstall"
 
   RMDir /r "$INSTDIR\bin"
   Delete "$INSTDIR\README.txt"
+  Delete "$INSTDIR\register-logger.cmd"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
 
   Delete "$SMPROGRAMS\Lan Mouse\Lan Mouse.lnk"
+  Delete "$SMPROGRAMS\Lan Mouse\Register logging.lnk"
   Delete "$SMPROGRAMS\Lan Mouse\Uninstall.lnk"
   RMDir  "$SMPROGRAMS\Lan Mouse"
   Delete "$DESKTOP\Lan Mouse.lnk"
