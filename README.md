@@ -444,6 +444,67 @@ lan-mouse daemon
 ```
 </details>
 
+<details>
+    <summary>Cross-OS log shipping (<code>remote_log</code>)</summary>
+
+When debugging across Linux + Windows + macOS, it's painful to correlate
+local log files. Lan Mouse+ ships with an opt-in integration to the
+[`cb-logger`](https://logger.cyberbook.id) service that fans every
+`log::*!` call out to a remote bulk-ingest endpoint, so a multi-host
+session appears as a single merged timeline.
+
+**Enabling.** Export `LOGGER_APIKEY` (the shared API key) before starting
+`lan-mouse`. On first run the daemon registers itself, caches the
+returned bearer token at
+`$XDG_CONFIG_HOME/lan-mouse/remote-log-token.json` (0600), and starts a
+background shipper. If the env var is unset, the integration is a silent
+no-op — logging behaves exactly like `env_logger`.
+
+```sh
+# load the key into the current shell, then start the daemon as usual
+set -a; source ./apikey.env; set +a
+lan-mouse daemon
+# stderr: "remote_log: shipping to https://logger.cyberbook.id as lan-mouse-linux-<hostname>"
+```
+
+**Joining multiple hosts into one view.** Each host registers under its
+own client name (`lan-mouse-<os>-<hostname>`). To see them all in one
+timeline, create a group on one host and have the others join:
+
+```sh
+# on the owner host (e.g. Linux)
+lan-mouse cli logger create lan-mouse-fleet
+# → prints invite_code: f30c0713b2e5a7f571174e69
+
+# on each other host (e.g. macOS + Windows), after they've also registered
+lan-mouse cli logger join f30c0713b2e5a7f571174e69
+
+# from any member host:
+lan-mouse cli logger tail --limit 50
+# combined Linux + macOS + Windows entries, oldest at top, with [os hostname] prefix
+```
+
+**Subcommand reference.**
+
+| Command | What it does |
+| --- | --- |
+| `lan-mouse cli logger status` | Show registered client name, client_id, and joined group (with invite_code if you're the owner). |
+| `lan-mouse cli logger create <name>` | Create a new logging group and persist its id + invite_code locally. |
+| `lan-mouse cli logger join <invite>` | Join an existing group using its invite code. |
+| `lan-mouse cli logger groups` | List groups this client owns or is a member of. |
+| `lan-mouse cli logger tail [--limit N] [--level L] [--mine-only]` | Pull recent entries (default 50; max 10000) from the saved group, or from this host alone when no group is joined / when `--mine-only`. |
+
+The CLI subcommands talk straight to the logger HTTP API — they don't
+require the local `lan-mouse` daemon to be running, only that the host
+has been registered at least once.
+
+**Disabling.** Drop the `remote_log` feature from the build
+(`--no-default-features`, or rebuild without it), or simply unset
+`LOGGER_APIKEY`. The cached token at
+`~/.config/lan-mouse/remote-log-token.json` can be deleted to force a
+fresh registration on next start.
+</details>
+
 ## Systemd Service
 
 In order to start lan-mouse with a graphical session automatically,

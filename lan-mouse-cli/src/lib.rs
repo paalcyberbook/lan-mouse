@@ -9,6 +9,9 @@ use lan_mouse_ipc::{
     FrontendEvent, FrontendRequest, IpcError, Position, connect_async,
 };
 
+#[cfg(feature = "remote_log")]
+mod logger;
+
 #[derive(Debug, Error)]
 pub enum CliError {
     /// is the service running?
@@ -96,6 +99,45 @@ enum CliSubcommand {
         #[command(subcommand)]
         action: ServiceAction,
     },
+    /// Manage this host's cb-logger registration (`remote_log` feature).
+    /// The daemon registers itself on first run with LOGGER_APIKEY set;
+    /// these subcommands let you join a multi-host group and inspect
+    /// state without going through curl.
+    #[cfg(feature = "remote_log")]
+    Logger {
+        #[command(subcommand)]
+        action: LoggerAction,
+    },
+}
+
+#[cfg(feature = "remote_log")]
+#[derive(Clone, Subcommand, Debug, PartialEq, Eq)]
+pub enum LoggerAction {
+    /// Show this host's registered client name + id and which group, if
+    /// any, it's a member of.
+    Status,
+    /// Create a new logging group with the given display name. Caches
+    /// the response (including the owner-only invite_code) locally so
+    /// `status` can show it.
+    Create { name: String },
+    /// Join a logging group via an invite code (printed by `create` or
+    /// shown in `status` on the owner host).
+    Join { invite_code: String },
+    /// List the groups this client owns / is a member of.
+    Groups,
+    /// Print recent log entries from the currently-saved group (falls
+    /// back to this host's own logs if no group is joined).
+    Tail {
+        /// Max entries to fetch (server caps at 10000; default 50).
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+        /// Filter by level — `info`, `warn`, `error`, etc.
+        #[arg(long)]
+        level: Option<String>,
+        /// Force per-client view even if a group is saved.
+        #[arg(long)]
+        mine_only: bool,
+    },
 }
 
 #[cfg(windows)]
@@ -120,6 +162,12 @@ pub async fn run(args: CliArgs) -> Result<(), CliError> {
 }
 
 async fn execute(cmd: CliSubcommand) -> Result<(), CliError> {
+    // Subcommands that don't need the running daemon. Handle them before
+    // connect_async so they work whether or not the service is up.
+    #[cfg(feature = "remote_log")]
+    if let CliSubcommand::Logger { action } = cmd.clone() {
+        return handle_logger_action(action);
+    }
     let (mut rx, mut tx) = connect_async(Some(Duration::from_millis(500))).await?;
     match cmd {
         CliSubcommand::AddClient(Client {
@@ -211,6 +259,28 @@ async fn execute(cmd: CliSubcommand) -> Result<(), CliError> {
         CliSubcommand::Service { action } => {
             handle_service_action(action);
         }
+        #[cfg(feature = "remote_log")]
+        CliSubcommand::Logger { .. } => unreachable!("handled before IPC connect"),
+    }
+    Ok(())
+}
+
+#[cfg(feature = "remote_log")]
+fn handle_logger_action(action: LoggerAction) -> Result<(), CliError> {
+    let res = match action {
+        LoggerAction::Status => logger::status(),
+        LoggerAction::Create { name } => logger::create(&name),
+        LoggerAction::Join { invite_code } => logger::join(&invite_code),
+        LoggerAction::Groups => logger::groups(),
+        LoggerAction::Tail {
+            limit,
+            level,
+            mine_only,
+        } => logger::tail(limit, level.as_deref(), mine_only),
+    };
+    if let Err(e) = res {
+        eprintln!("{e}");
+        std::process::exit(1);
     }
     Ok(())
 }

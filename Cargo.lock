@@ -2163,8 +2163,11 @@ dependencies = [
  "futures",
  "lan-mouse-ipc",
  "lan-mouse-service",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "ureq",
  "windows-sys 0.59.0",
 ]
 

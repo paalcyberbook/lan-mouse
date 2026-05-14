@@ -31,3 +31,24 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 lan-mouse-service = { path = "../lan-mouse-service", version = "0.1.0" }
+
+# remote_log feature: pulls in the cb-logger client deps for
+# `lan-mouse cli logger join|status`. Stays in lockstep with the root
+# crate's `remote_log` feature.
+[dependencies.ureq]
+version = "2.10"
+default-features = false
+features = ["json", "tls"]
+optional = true
+
+[dependencies.serde]
+version = "1"
+features = ["derive"]
+optional = true
+
+[dependencies.serde_json]
+version = "1"
+optional = true
+
+[features]
+remote_log = ["dep:ureq", "dep:serde", "dep:serde_json"]

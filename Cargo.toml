@@ -139,7 +139,7 @@ file_drop = [
     "dep:pem",
     "input-capture/file_drop",
 ]
-remote_log = ["dep:ureq"]
+remote_log = ["dep:ureq", "lan-mouse-cli/remote_log"]
 
 [package.metadata.bundle]
 # macOS .app bundle name — cargo-bundle turns this into the output
