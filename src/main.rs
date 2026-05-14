@@ -1,8 +1,11 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+#[cfg(not(feature = "remote_log"))]
 use env_logger::Env;
 use input_capture::InputCaptureError;
 use input_emulation::InputEmulationError;
+#[cfg(feature = "remote_log")]
+use lan_mouse::remote_log;
 use lan_mouse::{
     capture_test,
     config::{self, Command, Config, ConfigError},
@@ -50,8 +53,13 @@ fn main() {
     attach_parent_console();
 
     // init logging
-    let env = Env::default().filter_or("LAN_MOUSE_LOG_LEVEL", "info");
-    env_logger::init_from_env(env);
+    #[cfg(feature = "remote_log")]
+    remote_log::init();
+    #[cfg(not(feature = "remote_log"))]
+    {
+        let env = Env::default().filter_or("LAN_MOUSE_LOG_LEVEL", "info");
+        env_logger::init_from_env(env);
+    }
 
     if let Err(e) = run() {
         log::error!("{e}");

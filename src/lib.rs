@@ -15,4 +15,6 @@ pub mod emulation_test;
 #[cfg(feature = "file_drop")]
 pub(crate) mod file_transfer;
 mod listen;
+#[cfg(feature = "remote_log")]
+pub mod remote_log;
 pub mod service;

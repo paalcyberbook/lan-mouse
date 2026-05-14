@@ -75,6 +75,12 @@ notify = "8.2.0"
 mdns-sd = { version = "0.19", optional = true }
 arboard = { version = "3", optional = true }
 
+# remote_log feature: tiny sync HTTP client to ship logs to cb-logger.
+# Chose `ureq` over `reqwest` here because the shipper runs on a
+# dedicated std::thread before the tokio runtime exists, so we want a
+# fully synchronous client with no async runtime entanglement.
+ureq = { version = "2.10", default-features = false, features = ["json", "tls"], optional = true }
+
 # file_drop feature deps (QUIC side channel + clipboard-image-as-file bridge)
 quinn = { version = "0.11", default-features = false, features = ["rustls-ring", "runtime-tokio"], optional = true }
 zstd = { version = "0.13", optional = true }
@@ -111,6 +117,7 @@ default = [
     "discovery",
     "clipboard",
     "file_drop",
+    "remote_log",
 ]
 gtk = ["dep:lan-mouse-gtk"]
 layer_shell_capture = ["input-capture/layer_shell"]
@@ -132,6 +139,7 @@ file_drop = [
     "dep:pem",
     "input-capture/file_drop",
 ]
+remote_log = ["dep:ureq"]
 
 [package.metadata.bundle]
 # macOS .app bundle name — cargo-bundle turns this into the output
