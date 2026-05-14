@@ -447,11 +447,14 @@ lan-mouse daemon
 <details>
     <summary>Cross-OS log shipping (<code>remote_log</code>)</summary>
 
-When debugging across Linux + Windows + macOS, it's painful to correlate
-local log files. Lan Mouse+ ships with an opt-in integration to the
+**For debugging only** — when chasing a bug across Linux + Windows +
+macOS, it's painful to correlate three local log files. Lan Mouse+
+ships with an opt-in integration to the
 [`cb-logger`](https://logger.cyberbook.id) service that fans every
 `log::*!` call out to a remote bulk-ingest endpoint, so a multi-host
-session appears as a single merged timeline.
+session appears as a single merged timeline. This isn't production
+telemetry — it stays off until you set `LOGGER_APIKEY`, and you should
+turn it off again once the bug is fixed.
 
 **Enabling.** Export `LOGGER_APIKEY` (the shared API key) before starting
 `lan-mouse`. On first run the daemon registers itself, caches the

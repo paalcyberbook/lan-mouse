@@ -106,6 +106,16 @@ Backends for Linux, Windows, and macOS diverge significantly — clarify with th
 
 Config file: `$XDG_CONFIG_HOME/lan-mouse/config.toml` (defaults to `~/.config/lan-mouse/config.toml`). Example in [`config.toml`](config.toml) and in the README. Release-bind key symbols come from [`input-event/src/scancode.rs`](input-event/src/scancode.rs).
 
+## Cross-OS log shipping (`remote_log` feature)
+
+**Debugging-only.** Default-on opt-in integration with the `cb-logger` service so the same daemon running on Linux + Windows + macOS produces one merged timeline you can diff while chasing a bug across hosts. Not intended as production observability — there's no PII review, no retention policy beyond cb-logger's 30-day default, and no sampling. Keep it off by default in any user-distributable build; the env-var gate means a built-in binary is harmless until someone sets `LOGGER_APIKEY`. Fork-specific; not in upstream.
+
+- Implementation: [`src/remote_log.rs`](src/remote_log.rs) — custom `log::Log` that wraps `env_logger` and fans every record out to a dedicated `std::thread` shipper. The shipper uses `std::sync::mpsc::sync_channel(4096)` + `ureq` (sync HTTP) deliberately so logger init can run before the tokio runtime exists. Don't migrate this to `reqwest`/tokio without a strong reason.
+- Activation is env-var-gated: `LOGGER_APIKEY` (or `CB_LOGGER_API_KEY`) absent → silent no-op, identical to plain `env_logger`. The shared API key is only used once for `POST /v1/register`; the returned bearer token is cached at `~/.config/lan-mouse/remote-log-token.json` (0600 on Unix) and reused across restarts. Re-registers if the client_name (`lan-mouse-<os>-<hostname>`) changes.
+- CLI surface: [`lan-mouse-cli/src/logger.rs`](lan-mouse-cli/src/logger.rs) provides `lan-mouse cli logger {status,create,join,groups,tail}`. These talk straight to the logger HTTP API and are dispatched **before** `connect_async` in [`lan-mouse-cli/src/lib.rs`](lan-mouse-cli/src/lib.rs) so they work with no running daemon. Gated by the `remote_log` feature on `lan-mouse-cli`, which the root crate's `remote_log` feature enables in lockstep.
+- Group cache lives at `~/.config/lan-mouse/remote-log-group.json` (also 0600). API key file (`_REF_/logger/apikey.env`) lives under `_REF_/` which is gitignored — never commit secret material.
+- User-facing docs are in [README.md](README.md) under "Cross-OS log shipping".
+
 ## Docs stay current
 
 When changing public APIs or platform support, update [README.md](README.md) and/or [DOC.md](DOC.md) in the same PR.
