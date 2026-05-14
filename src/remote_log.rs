@@ -35,6 +35,7 @@ use serde_json::{json, Value};
 
 const DEFAULT_HOST: &str = "https://logger.cyberbook.id";
 const TOKEN_FILE: &str = "remote-log-token.json";
+const STATUS_FILE: &str = "remote-log-status.txt";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 const BATCH_INTERVAL: Duration = Duration::from_millis(1000);
 const MAX_BATCH: usize = 256;
@@ -125,13 +126,10 @@ struct TokenCache {
 }
 
 fn try_init_remote() -> Result<Option<RemoteHandle>, String> {
-    let api_key = match env::var("CB_LOGGER_API_KEY")
-        .ok()
-        .or_else(|| env::var("LOGGER_APIKEY").ok())
-    {
-        Some(k) if !k.trim().is_empty() => k,
-        _ => return Ok(None),
-    };
+    if env::var("LAN_MOUSE_REMOTE_LOG_DISABLE").is_ok() {
+        write_status("disabled by LAN_MOUSE_REMOTE_LOG_DISABLE");
+        return Ok(None);
+    }
     let host = env::var("CB_LOGGER_HOST").unwrap_or_else(|_| DEFAULT_HOST.into());
 
     let host_name = hostname::get()
@@ -150,11 +148,38 @@ fn try_init_remote() -> Result<Option<RemoteHandle>, String> {
     });
 
     let token_path = token_path()?;
-    let token = load_or_register(&host, &api_key, &client_name, &metadata, &token_path)?;
-    eprintln!(
-        "remote_log: shipping to {host} as {client_name} (token cached at {})",
+
+    // The bearer token is what authorises log pushes; the API key is only
+    // ever needed for one-time registration. So: load the cache first,
+    // and only fall back to register-from-API-key when no usable cache
+    // exists. Means a user who ran the register helper once doesn't have
+    // to keep `LOGGER_APIKEY` in their environment forever — handy on
+    // Windows where Explorer-launched processes inherit a stale env.
+    let (token, source) = match load_cached_token(&token_path, &client_name) {
+        Some(t) => (t, "cached token"),
+        None => match read_api_key() {
+            Some(api_key) => {
+                let t = register_new(&host, &api_key, &client_name, &metadata, &token_path)?;
+                (t, "freshly registered")
+            }
+            None => {
+                let msg = format!(
+                    "no cached token at {} and no LOGGER_APIKEY in env — run the register \
+                     helper (Windows: register-logger.cmd; Linux/macOS: source apikey.env then \
+                     start lan-mouse once) to opt in",
+                    token_path.display()
+                );
+                write_status(&format!("disabled ({msg})"));
+                return Ok(None);
+            }
+        },
+    };
+    let status_line = format!(
+        "shipping to {host} as {client_name} (source: {source}, cache: {})",
         token_path.display()
     );
+    eprintln!("remote_log: {status_line}");
+    write_status(&status_line);
 
     let (tx, rx) = mpsc::sync_channel::<LogEntry>(QUEUE_CAP);
     let host_clone = host.clone();
@@ -167,20 +192,30 @@ fn try_init_remote() -> Result<Option<RemoteHandle>, String> {
     Ok(Some(RemoteHandle { tx }))
 }
 
-fn load_or_register(
+fn read_api_key() -> Option<String> {
+    env::var("CB_LOGGER_API_KEY")
+        .ok()
+        .or_else(|| env::var("LOGGER_APIKEY").ok())
+        .filter(|k| !k.trim().is_empty())
+}
+
+fn load_cached_token(token_path: &Path, client_name: &str) -> Option<String> {
+    let raw = fs::read_to_string(token_path).ok()?;
+    let cached: TokenCache = serde_json::from_str(&raw).ok()?;
+    if cached.name == client_name && !cached.token.is_empty() {
+        Some(cached.token)
+    } else {
+        None
+    }
+}
+
+fn register_new(
     host: &str,
     api_key: &str,
     client_name: &str,
     metadata: &Value,
     token_path: &Path,
 ) -> Result<String, String> {
-    if let Ok(raw) = fs::read_to_string(token_path) {
-        if let Ok(cached) = serde_json::from_str::<TokenCache>(&raw) {
-            if cached.name == client_name && !cached.token.is_empty() {
-                return Ok(cached.token);
-            }
-        }
-    }
     let resp: TokenCache = ureq::post(&format!("{host}/v1/register"))
         .set("X-API-Key", api_key)
         .set("Content-Type", "application/json")
@@ -225,7 +260,26 @@ fn persist_token(path: &Path, cache: &TokenCache) -> Result<(), String> {
     Ok(())
 }
 
-fn token_path() -> Result<PathBuf, String> {
+/// Append a single-line status entry to a stable, predictable file so a
+/// user on Windows (whose Explorer-launched lan-mouse.exe loses stderr)
+/// can tail the file to see whether the shipper actually started.
+fn write_status(line: &str) {
+    let Ok(dir) = config_dir() else { return };
+    let Ok(()) = fs::create_dir_all(&dir) else { return };
+    let path = dir.join(STATUS_FILE);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let pid = std::process::id();
+    let entry = format!("ts={now} pid={pid}  {line}\n");
+    // Best-effort: ignore failures so a read-only profile can't break logging.
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = f.write_all(entry.as_bytes());
+    }
+}
+
+fn config_dir() -> Result<PathBuf, String> {
     let base = if let Ok(xdg) = env::var("XDG_CONFIG_HOME") {
         PathBuf::from(xdg)
     } else if let Ok(home) = env::var("HOME") {
@@ -235,7 +289,11 @@ fn token_path() -> Result<PathBuf, String> {
     } else {
         return Err("no XDG_CONFIG_HOME / HOME / APPDATA in env".into());
     };
-    Ok(base.join("lan-mouse").join(TOKEN_FILE))
+    Ok(base.join("lan-mouse"))
+}
+
+fn token_path() -> Result<PathBuf, String> {
+    Ok(config_dir()?.join(TOKEN_FILE))
 }
 
 fn shipper_loop(host: String, token: String, meta: Value, rx: Receiver<LogEntry>) {

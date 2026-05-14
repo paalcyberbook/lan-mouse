@@ -193,6 +193,21 @@ pub fn status() -> Result<(), String> {
         },
         Err(_) => println!("group:       (not joined; run `lan-mouse cli logger join <code>`)"),
     }
+
+    // Shipper state: the daemon's remote_log::init writes a line to this
+    // file on every startup. Tail the last entry so the user knows
+    // whether the most recent lan-mouse process is actually shipping.
+    let status_path = config_dir()?.join("remote-log-status.txt");
+    match fs::read_to_string(&status_path) {
+        Ok(raw) => match raw.lines().rev().find(|l| !l.trim().is_empty()) {
+            Some(last) => println!("shipper:     {last}"),
+            None => println!("shipper:     (status file empty — start lan-mouse to populate)"),
+        },
+        Err(_) => println!(
+            "shipper:     (no status yet — start lan-mouse once; status written to {})",
+            status_path.display()
+        ),
+    }
     Ok(())
 }
 
